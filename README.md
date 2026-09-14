@@ -91,6 +91,8 @@ Released under the [MIT License](LICENSE). Abaqus is a product of Dassault Syst�
 
 Author: **sysu@Liu Renjie**  
 Contact: [liurj6@mail2.sysu.edu.cn](mailto:liurj6@mail2.sysu.edu.cn)
+This plugin is completely free; if you find it useful, simply offer a silent word of thanks to the author.
+If you paid someone to obtain this plugin, or encounter links selling it, please contact the author.
 
 ## 中文
 
@@ -176,4 +178,6 @@ Preview 会临时应用显示设置。点击 **Reset** 或关闭对话框可恢�
 
 作者：**sysu@刘仁杰**  
 联系邮箱：[liurj6@mail2.sysu.edu.cn](mailto:liurj6@mail2.sysu.edu.cn)
+此插件完全免费，若对您有用仅需默念谢谢作者 :)
+如果您在其他人手中付费获得此插件，或遇见售卖该插件的链接，请联系作者。
 
