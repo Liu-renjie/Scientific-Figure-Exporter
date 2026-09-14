@@ -24,6 +24,7 @@ Scientific Figure Exporter helps prepare clean figures directly from Abaqus/CAE 
 - **Export common figure formats.** PNG, TIFF, and SVG are supported. JPG is supported on Windows through the built-in GDI+ encoder.
 
 ![Contour, spectrum, and viewport background controls](docs/assets/contour_style_reference.png)
+![Contour, spectrum, and viewport background controls](docs/assets/contour_style_reference1.png)
 
 ### Important camera setting
 
