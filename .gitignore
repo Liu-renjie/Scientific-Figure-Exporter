@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.bak_*
+*.lck
+*.odb
+*.cae
+*.msg
+*.sta
+*.dat
+*.prt
+*.sim
+*.com
+*.log
+*.rpy*
+*.dmp
