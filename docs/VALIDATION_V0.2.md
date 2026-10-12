@@ -1,0 +1,44 @@
+# V0.2 validation scope 验证范围
+
+Target: Windows + Abaqus/CAE 2021 + embedded Python 2.7 only.
+
+## Evidence available for this release
+
+- Actual CAE 2021 noGUI checks covered component/invariant refinement,
+  four subitems across two Frames (eight output images), Preview/Reset,
+  invalid-component rejection followed by a successful export, Combined canvas
+  naming, state restoration and the eight-Frame metadata cache bound.
+- Actual CAE 2021 GUI checks covered opening the repaired Field Output selector,
+  selecting U1/U2/U3, applying three selected outputs, reopening the selector,
+  and displaying stress invariant/component rows. This was performed in a
+  separate session with a read-only ODB. It is not a full GUI timing benchmark.
+- The user subsequently tried the current build and reported no obvious issue.
+- Release preparation changes the public version metadata and documentation,
+  not the tested runtime functionality. Python 2.7 syntax and package contents
+  are checked separately during packaging.
+
+Small local timing measurements are recorded in
+[the performance note](PERFORMANCE_UPDATE_20261011.md). They exclude GUI/IPC
+overhead, use a specific model and image size, and are not performance guarantees
+for other ODBs, larger images or hardware. No other CAE version is claimed.
+
+## Short manual regression checklist
+
+1. Open, close with both Close and the window X, then reopen the plug-in.
+2. Preview once; change several settings with Auto-update enabled.
+3. Select a field, an available component/invariant and multiple Frames.
+4. Export; review filenames in the plan, cancel once and confirm once.
+5. Deliberately choose an unavailable output or invalid destination, then
+   correct it and export again. Confirm controls are not permanently locked.
+6. Reset and confirm the original Frame, field and camera are restored.
+7. With Auto Fit disabled, check that manual zoom/pan is preserved.
+
+## 中文
+
+已区分实际 noGUI 检查与 GUI 检查：前者覆盖分量、多帧出图、恢复、错误后重试
+及合并画布等；后者专项验证场变量选择器的打开、多选、应用及重新打开。
+用户随后确认当前版本试用无明显问题。本次发布整理不额外修改功能逻辑。
+
+以上不是所有模型的性能保证，也不代表其他 Abaqus 版本已兼容。人工回归重点
+为开关窗口、预览与自动更新、连续改设置、导出计划和实际导出、故意报错后重试、
+Reset 以及 Close 后重新打开。保留手动视角时关闭 Auto Fit。
