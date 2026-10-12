@@ -1,0 +1,57 @@
+name: Publish release
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scientific-figure-exporter-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build and verify the install package
+        run: python3 scripts/build_release.py --output-dir "$RUNNER_TEMP/sfe-release"
+
+      - name: Create a new release without replacing existing tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          tag="v${version}"
+          notes="docs/releases/${tag}.md"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to overwrite it."
+            exit 1
+          fi
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists; refusing to move it."
+            exit 1
+          fi
+          gh release create "$tag" \
+            "$RUNNER_TEMP/sfe-release/Scientific-Figure-Exporter-V${version}.zip" \
+            "$RUNNER_TEMP/sfe-release/ScientificFigureExporter_User_Guide.docx" \
+            "$RUNNER_TEMP/sfe-release/SHA256SUMS.txt" \
+            --draft --target "$GITHUB_SHA" \
+            --title "Scientific Figure Exporter V${version}" --notes-file "$notes"
+          gh release edit "$tag" --draft=false --latest
+          gh release view "$tag" --json url,tagName,isDraft,assets
