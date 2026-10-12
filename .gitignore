@@ -13,3 +13,6 @@ __pycache__/
 *.log
 *.rpy*
 *.dmp
+diagnostics/performance_output/
+dist/
+.release-qa/

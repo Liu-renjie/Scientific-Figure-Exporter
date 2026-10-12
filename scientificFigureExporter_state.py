@@ -43,6 +43,25 @@ def _read_properties(obj, names):
     return values
 
 
+def _read_odb_result_state(viewport):
+    """Capture the active ODB frame and primary-variable selection."""
+    values = {}
+    try:
+        odb_display = getattr(viewport, 'odbDisplay')
+        try:
+            values['fieldFrame'] = tuple(odb_display.fieldFrame)
+        except Exception:
+            pass
+        try:
+            primary = odb_display.primaryVariable
+            values['primaryVariable'] = tuple(primary)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return values
+
+
 def snapshot(session, viewport):
     """Return a best-effort snapshot of exporter-mutable settings."""
     state = {
@@ -58,6 +77,7 @@ def snapshot(session, viewport):
         'annotationOptions': _read_properties(
             getattr(viewport, 'viewportAnnotationOptions', None),
             _ANNOTATION_PROPERTIES),
+        'odbResultState': _read_odb_result_state(viewport),
         'graphicsOptions': _read_properties(
             getattr(session, 'graphicsOptions', None),
             _GRAPHICS_PROPERTIES),
@@ -168,6 +188,96 @@ def restore_session_state(session, state):
     _restore_session_state(session, state)
 
 
+def _restore_odb_result_state(viewport, values):
+    """Restore the ODB frame and primary variable when Abaqus exposes them."""
+    if not values:
+        return
+    try:
+        odb_display = getattr(viewport, 'odbDisplay')
+    except Exception:
+        return
+
+    field_frame = values.get('fieldFrame')
+    primary = values.get('primaryVariable')
+    # Restoring an unchanged frame/variable needlessly forces Abaqus to read
+    # the ODB again.  The snapshot tuple is cheap and includes the refinement.
+    try:
+        same_frame = (field_frame is None or
+                      tuple(odb_display.fieldFrame) == tuple(field_frame))
+        same_primary = (primary is None or
+                        tuple(odb_display.primaryVariable) == tuple(primary))
+        if same_frame and same_primary:
+            return
+    except Exception:
+        same_frame = False
+    if field_frame is not None:
+        try:
+            # Abaqus/CAE 2021 accepts the step/frame keyword form.  Keep this
+            # best-effort because Model viewports do not expose this route.
+            if not same_frame:
+                odb_display.setFrame(step=int(field_frame[0]),
+                                      frame=int(field_frame[1]))
+        except Exception:
+            pass
+
+    if primary is None or len(primary) < 1:
+        return
+    # Abaqus/CAE 2021 accepts the output-position value already stored in its
+    # primaryVariable tuple.  Verified in primary_position_probe.py.  This
+    # avoids loading a complete ODB Frame merely to recover its location.
+    try:
+        from abaqusConstants import COMPONENT, INVARIANT
+        fast_kwargs = {'variableLabel': primary[0],
+                       'outputPosition': primary[1]}
+        if len(primary) > 5 and primary[5]:
+            refinement_name = primary[5]
+            normalized = str(refinement_name).lower().replace('.', '')
+            invariant_names = (
+                'mises', 'max principal', 'mid principal', 'min principal',
+                'tresca', 'press', 'inv3', 'magnitude',
+                'max in-plane principal', 'min in-plane principal',
+                'out-of-plane principal')
+            kind = INVARIANT if normalized in invariant_names else COMPONENT
+            fast_kwargs['refinement'] = (kind, refinement_name)
+        odb_display.setPrimaryVariable(**fast_kwargs)
+        return
+    except Exception:
+        # Preserve the existing restoration route if the compact tuple is
+        # unavailable for this display, rather than guessing a position.
+        pass
+    try:
+        label = primary[0]
+        odb = getattr(viewport, 'displayedObject')
+        if field_frame is None:
+            field_frame = tuple(odb_display.fieldFrame)
+        step_names = list(odb.steps.keys())
+        step = odb.steps[step_names[int(field_frame[0])]]
+        frame = step.frames[int(field_frame[1])]
+        field_output = frame.fieldOutputs[label]
+        output_position = field_output.locations[0].position
+        kwargs = {
+            'variableLabel': label,
+            'outputPosition': output_position,
+        }
+        if len(primary) > 5 and primary[5]:
+            from abaqusConstants import COMPONENT, INVARIANT
+            refinement_name = primary[5]
+            invariant_names = (
+                'mises', 'max principal', 'mid principal',
+                'min principal', 'tresca', 'press', 'inv3',
+                'magnitude')
+            if str(refinement_name).lower() in invariant_names:
+                refinement_type = INVARIANT
+            else:
+                refinement_type = COMPONENT
+            kwargs['refinement'] = (refinement_type, refinement_name)
+        odb_display.setPrimaryVariable(**kwargs)
+    except Exception:
+        # Restoring the frame is more important than failing the entire export
+        # reset if a release exposes a primary-variable tuple differently.
+        pass
+
+
 def restore(session, viewport, state, restore_session_options=True,
             make_current=True):
     """Restore the settings captured by :func:`snapshot`.
@@ -179,6 +289,7 @@ def restore(session, viewport, state, restore_session_options=True,
     if restore_session_options:
         _restore_session_state(session, state)
     display_state = state.get('displayOptions', {})
+    _restore_odb_result_state(viewport, state.get('odbResultState', {}))
     try:
         _restore_properties(viewport.odbDisplay.commonOptions,
                             display_state.get('odbCommonOptions', {}))

@@ -9,9 +9,11 @@ can be imported and smoke-tested in Abaqus noGUI mode.
 from __future__ import absolute_import
 
 import os
+import json
 import re
 import time
 import traceback
+from collections import OrderedDict
 
 from abaqus import mdb, session
 from abaqusConstants import OFF, ON, PNG
@@ -74,6 +76,10 @@ _HEX_COLOR = re.compile(r'^#[0-9A-Fa-f]{6}$')
 # to the user's model.  Reset uses the same state.restore path as export.
 _PREVIEW_STATES = {}
 _PREVIEW_GLOBAL_STATE = None
+
+# Small metadata-only cache. No mesh, field values or native Frame objects are
+# retained. Source path and file size/mtime prevent reuse across changed ODBs.
+_FIELD_METADATA_CACHE = OrderedDict()
 
 
 def _text(value):
@@ -316,14 +322,455 @@ def _target_image_size(aspect, customAspect, lockRatio, resolutionMode,
     return width, height
 
 
+def _field_output_tokens(*values):
+    """Return ordered, de-duplicated Field Output requests."""
+    tokens = []
+    seen = set()
+    for value in values:
+        text = _text(value)
+        if not text:
+            continue
+        for raw in re.split(r'[|;/]+', text):
+            raw = _text(raw)
+            if not raw:
+                continue
+            compact = raw.lower().replace(' ', '')
+            # The GUI presents the common stress invariant as ``S, Mises``;
+            # keep that display label a single Abaqus variable request.
+            if compact in ('s,mises', 's,mises(avg:75%)'):
+                raw = 'S, Mises'
+            key = raw.lower().replace(' ', '')
+            # A plain stress/displacement row uses the same default invariant
+            # as its explicit Mises/Magnitude row. Drag selection may include
+            # both; keep one request instead of producing duplicate files.
+            if key == 's':
+                key = 's,mises'
+            elif key == 'u':
+                key = 'u,magnitude'
+            if key not in seen:
+                seen.add(key)
+                tokens.append(raw)
+    return tokens
+
+
+def _field_output_display_name(label):
+    label = _text(label)
+    if label.upper() == 'S':
+        return 'S_Mises'
+    return _safe_stem(label or 'Current')
+
+
+def _frame_display_name(frame_index):
+    return 'Frame-%04d' % int(frame_index)
+
+
+def _resolve_field_output(frame, requested, step_name, frame_index,
+                          field_keys=None):
+    """Resolve a requested label against one concrete ODB frame."""
+    field_outputs = frame.fieldOutputs
+    request, subitem = _split_field_request(requested)
+    aliases = {
+        's,mises': 'S',
+        's,mises(avg:75%)': 'S',
+    }
+    request = aliases.get(request.lower().replace(' ', ''), request)
+    if field_keys is None:
+        field_keys = list(field_outputs.keys())
+    keys = field_keys
+    for key in keys:
+        if key == request or _text(key).lower() == request.lower():
+            field = field_outputs[key]
+            if subitem:
+                _requested_refinement(field, subitem)
+            return key + (', ' + subitem if subitem else ''), field
+    raise ValueError(
+        'Field Output %s is not available in Step %s, Frame %d.' %
+        (request, step_name, int(frame_index)))
+
+
+_INVARIANT_LABELS = {
+    'MISES': 'Mises', 'TRESCA': 'Tresca', 'PRESS': 'Press',
+    'INV3': 'Inv3', 'MAGNITUDE': 'Magnitude',
+    'MAX_PRINCIPAL': 'Max. Principal',
+    'MID_PRINCIPAL': 'Mid. Principal',
+    'MIN_PRINCIPAL': 'Min. Principal',
+    'MAX_INPLANE_PRINCIPAL': 'Max. In-Plane Principal',
+    'MIN_INPLANE_PRINCIPAL': 'Min. In-Plane Principal',
+    'OUTOFPLANE_PRINCIPAL': 'Out-of-Plane Principal',
+}
+
+
+def _split_field_request(request):
+    parts = _text(request).split(',', 1)
+    return parts[0].strip(), parts[1].strip() if len(parts) > 1 else ''
+
+
+def _refinement_key(label):
+    return re.sub(r'[^a-z0-9]', '', _text(label).lower())
+
+
+def _available_invariant_labels(field_output):
+    labels = [_INVARIANT_LABELS[str(value)]
+              for value in field_output.validInvariants
+              if str(value) in _INVARIANT_LABELS]
+    # Native CAE 2021 accepts stress Mises for surface tensors even where the
+    # ODB validInvariants tuple omits MISES (verified by components_regression).
+    if (field_output.name.upper() == 'S' and
+            str(field_output.type).startswith('TENSOR_') and
+            'Mises' not in labels):
+        labels.append('Mises')
+    return labels
+
+
+def _requested_refinement(field_output, subitem):
+    key = _refinement_key(subitem)
+    for component in field_output.componentLabels:
+        if _refinement_key(component) == key:
+            return (_constant('COMPONENT'), component)
+    for label in _available_invariant_labels(field_output):
+        if _refinement_key(label) == key:
+            return (_constant('INVARIANT'), label)
+    raise ValueError('Field Output subitem is unavailable: %s' % subitem)
+
+
+def _field_refinement(field_output, subitem=''):
+    """Choose a stable invariant for common vector/tensor outputs."""
+    if subitem:
+        return _requested_refinement(field_output, subitem)
+    if 'Mises' in _available_invariant_labels(field_output):
+        return (_constant('INVARIANT'), 'Mises')
+    invariant_names = []
+    try:
+        invariant_names = [str(value).lower()
+                           for value in field_output.validInvariants]
+    except Exception:
+        pass
+    if any('mises' in value for value in invariant_names):
+        return (_constant('INVARIANT'), 'Mises')
+    if any('magnitude' in value for value in invariant_names):
+        return (_constant('INVARIANT'), 'Magnitude')
+    # A scalar Field Output needs no refinement.  If a custom vector/tensor
+    # has no recognized invariant, use its first component as a deterministic
+    # fallback rather than asking Abaqus to infer one.
+    try:
+        components = tuple(field_output.componentLabels)
+    except Exception:
+        components = ()
+    if components:
+        return (_constant('COMPONENT'), components[0])
+    return None
+
+
+def _frame_metadata(odb, step_name, frame_index, refresh=False):
+    path = getattr(odb, 'path', '')
+    try:
+        stat = os.stat(path)
+        stamp = (stat.st_size, stat.st_mtime)
+    except OSError:
+        stamp = None
+    # Native Abaqus may return a fresh Python wrapper for the same ODB after
+    # viewport restoration; id(odb) would incorrectly miss that cache entry.
+    key = (os.path.normcase(os.path.abspath(path)), stamp,
+           step_name, int(frame_index))
+    if stamp is not None and not refresh and key in _FIELD_METADATA_CACHE:
+        return _FIELD_METADATA_CACHE[key]
+    frame = odb.steps[step_name].frames[frame_index]
+    outputs = frame.fieldOutputs
+    metadata = {}
+    for label in outputs.keys():
+        field = outputs[label]
+        positions = tuple(location.position for location in field.locations)
+        metadata[label] = {
+            'components': tuple(field.componentLabels),
+            'invariants': tuple(_available_invariant_labels(field)),
+            'position': positions[0] if positions else None,
+        }
+    _FIELD_METADATA_CACHE[key] = metadata
+    while len(_FIELD_METADATA_CACHE) > 8:
+        _FIELD_METADATA_CACHE.popitem(last=False)
+    return metadata
+
+
+def _metadata_field_spec(metadata, requested, step_name, frame_index):
+    label, subitem = _split_field_request(requested)
+    actual = next((name for name in metadata
+                   if name.lower() == label.lower()), None)
+    if actual is None:
+        raise ValueError('Field Output %s is not available in Step %s, Frame %d.'
+                         % (label, step_name, frame_index))
+    info = metadata[actual]
+    if info['position'] is None:
+        raise ValueError('Field Output %s has no output location in Frame %d.'
+                         % (actual, frame_index))
+    spec = {'variableLabel': actual, 'outputPosition': info['position']}
+    refinement = None
+    if subitem:
+        for kind, choices in (('COMPONENT', info['components']),
+                              ('INVARIANT', info['invariants'])):
+            for choice in choices:
+                if _refinement_key(choice) == _refinement_key(subitem):
+                    refinement = (_constant(kind), choice)
+                    subitem = choice
+                    break
+            if refinement is not None:
+                break
+        if refinement is None:
+            raise ValueError('Field Output subitem is unavailable: %s' % requested)
+    elif 'Mises' in info['invariants']:
+        refinement = (_constant('INVARIANT'), 'Mises')
+    elif 'Magnitude' in info['invariants']:
+        refinement = (_constant('INVARIANT'), 'Magnitude')
+    elif info['components']:
+        refinement = (_constant('COMPONENT'), info['components'][0])
+    if refinement is not None:
+        spec['refinement'] = refinement
+    return actual + (', ' + subitem if subitem else ''), spec
+
+
+def _current_odb_context(viewport):
+    if not _is_odb_viewport(viewport):
+        raise RuntimeError('Field/Frame batch export requires an ODB viewport.')
+    odb = viewport.displayedObject
+    odb_display = viewport.odbDisplay
+    step_names = list(odb.steps.keys())
+    if not step_names:
+        raise ValueError('The displayed ODB contains no analysis Step.')
+    field_frame = tuple(odb_display.fieldFrame)
+    if len(field_frame) < 2:
+        raise ValueError('Abaqus did not return a valid ODB Step/Frame selection.')
+    step_index = int(field_frame[0])
+    frame_index = int(field_frame[1])
+    if step_index < 0 or step_index >= len(step_names):
+        raise ValueError('The current ODB Step index is invalid.')
+    step_name = step_names[step_index]
+    if frame_index < 0 or frame_index >= len(odb.steps[step_name].frames):
+        raise ValueError('The current ODB Frame index is invalid.')
+    return odb, step_names, step_index, frame_index, step_name
+
+
+def _resolve_step_name(odb, step_names, requested, current_index):
+    requested = _text(requested)
+    if not requested or requested.lower() == 'current':
+        return step_names[current_index], current_index
+    for index, name in enumerate(step_names):
+        if name == requested or _text(name).lower() == requested.lower():
+            return name, index
+    raise ValueError('ODB Step not found: %s' % requested)
+
+
+def _selected_frame_indices(step, frame_selection, every_n, specified_frames,
+                            current_step_index, selected_step_index,
+                            current_frame_index):
+    try:
+        mode = int(frame_selection)
+    except Exception:
+        raise ValueError('Frame selection mode must be an integer.')
+    if mode not in (0, 1, 2, 3, 4):
+        raise ValueError('Unknown Frame selection mode: %s' % frame_selection)
+    count = len(step.frames)
+    if count <= 0:
+        raise ValueError('The selected ODB Step contains no Frames.')
+    if mode == 0:
+        if selected_step_index != current_step_index:
+            raise ValueError(
+                'Current Frame mode requires the selected Step to be current.')
+        return [current_frame_index]
+    if mode == 1:
+        return [0]
+    if mode == 2:
+        return [count - 1]
+    if mode == 3:
+        interval = _positive_integer(every_n, 'Every N Frames')
+        indices = list(range(0, count, interval))
+        if indices[-1] != count - 1:
+            indices.append(count - 1)
+        return indices
+
+    text = _text(specified_frames)
+    if not text:
+        raise ValueError('Specify at least one Frame index.')
+    indices = []
+    for token in re.split(r'[|,;\s]+', text):
+        token = _text(token)
+        if not token:
+            continue
+        try:
+            index = int(token)
+        except Exception:
+            raise ValueError('Frame indices must be integers: %s' % token)
+        if index < 0 or index >= count:
+            raise ValueError(
+                'Frame index %d is outside the selected Step (0-%d).' %
+                (index, count - 1))
+        if index not in indices:
+            indices.append(index)
+    if not indices:
+        raise ValueError('Specify at least one Frame index.')
+    indices.sort()
+    return indices
+
+
+def _build_batch_plan(viewport, fieldOutputs='', customFieldOutputs='',
+                      stepName='', frameSelection=0, everyN=1,
+                      specifiedFrames='', validate_fields=True,
+                      first_only=False):
+    """Build a deterministic field/frame plan before any files are written."""
+    fields = _field_output_tokens(fieldOutputs, customFieldOutputs)
+    try:
+        frame_mode = int(frameSelection)
+    except Exception:
+        raise ValueError('Frame selection mode must be an integer.')
+    explicit_step = bool(_text(stepName))
+    requested = bool(fields or explicit_step or frame_mode != 0)
+    if not requested:
+        return [{'batchState': False, 'fieldName': 'Current',
+                 'stepName': '', 'frameIndex': None,
+                 'frameLabel': 'Current', 'fieldLabel': None}]
+
+    odb, step_names, current_step_index, current_frame_index, unused = \
+        _current_odb_context(viewport)
+    selected_step_name, selected_step_index = _resolve_step_name(
+        odb, step_names, stepName, current_step_index)
+    selected_step = odb.steps[selected_step_name]
+    frame_indices = _selected_frame_indices(
+        selected_step, frame_mode, everyN, specifiedFrames,
+        current_step_index, selected_step_index, current_frame_index)
+    if first_only:
+        frame_indices = frame_indices[:1]
+        fields = fields[:1]
+
+    resolved_fields = fields or [None]
+    field_specs = {}
+    if fields and validate_fields:
+        resolved_fields = []
+        metadata_cache = {}
+
+        def metadata_for(frame_index):
+            if frame_index not in metadata_cache:
+                metadata_cache[frame_index] = _frame_metadata(
+                    odb, selected_step_name, frame_index)
+            return metadata_cache[frame_index]
+
+        for requested_field in fields:
+            actual, unused_spec = _metadata_field_spec(
+                metadata_for(frame_indices[0]), requested_field,
+                selected_step_name, frame_indices[0])
+            for frame_index in frame_indices:
+                resolved, spec = _metadata_field_spec(
+                    metadata_for(frame_index), actual, selected_step_name,
+                    frame_index)
+                field_specs[(actual, frame_index)] = spec
+            resolved_fields.append(actual)
+
+    plan = []
+    for field_label in resolved_fields:
+        for frame_index in frame_indices:
+            plan.append({
+                'batchState': True,
+                'fieldLabel': field_label,
+                'fieldName': _field_output_display_name(field_label),
+                'stepName': selected_step_name,
+                'frameIndex': frame_index,
+                'frameLabel': _frame_display_name(frame_index),
+                '_fieldSpec': field_specs.get((field_label, frame_index)),
+                '_odbPath': getattr(odb, 'path', None),
+            })
+    return plan
+
+
+def _validate_batch_plan(viewport, plan, validate_fields=True):
+    """Validate a batch plan against one viewport with one ODB lookup.
+
+    ``_build_batch_plan`` already validates every selected field/frame against
+    the first target viewport.  Additional viewports still need validation,
+    but the first pass does not need to repeat the same potentially expensive
+    FieldOutput repository walk.
+    """
+    items = [item for item in plan if item.get('batchState')]
+    if not items:
+        return
+    odb, step_names, unused_step, unused_frame, unused_name = \
+        _current_odb_context(viewport)
+    steps = dict((name, odb.steps[name].frames)
+                 for name in set(item['stepName'] for item in items)
+                 if name in step_names)
+    metadata_cache = {}
+
+    for item in items:
+        if not item.get('batchState'):
+            continue
+        step_name = item['stepName']
+        if step_name not in odb.steps.keys():
+            raise ValueError('ODB Step not found in viewport: %s' % step_name)
+        step = odb.steps[step_name]
+        frame_index = int(item['frameIndex'])
+        if frame_index < 0 or frame_index >= len(steps[step_name]):
+            raise ValueError(
+                'Frame index %d is unavailable in Step %s.' %
+                (frame_index, step_name))
+        if validate_fields and item.get('fieldLabel'):
+            cache_key = (step_name, frame_index)
+            if cache_key not in metadata_cache:
+                metadata_cache[cache_key] = _frame_metadata(
+                    odb, step_name, frame_index)
+            _metadata_field_spec(metadata_cache[cache_key], item['fieldLabel'],
+                                 step_name, frame_index)
+
+
+def _apply_odb_batch_state(viewport, item):
+    if not item or not item.get('batchState'):
+        return
+    odb, step_names, unused_step, unused_frame, unused_name = \
+        _current_odb_context(viewport)
+    step_name = item['stepName']
+    if step_name not in odb.steps.keys():
+        raise ValueError('ODB Step not found in viewport: %s' % step_name)
+    step_index = step_names.index(step_name)
+    frame_index = int(item['frameIndex'])
+    step = odb.steps[step_name]
+    if frame_index < 0 or frame_index >= len(step.frames):
+        raise ValueError(
+            'Frame index %d is unavailable in Step %s.' %
+            (frame_index, step_name))
+    odb_display = viewport.odbDisplay
+    if tuple(odb_display.fieldFrame) != (step_index, frame_index):
+        odb_display.setFrame(step=step_index, frame=frame_index)
+    if item.get('fieldLabel'):
+        kwargs = item.get('_fieldSpec')
+        if not kwargs or item.get('_odbPath') != getattr(odb, 'path', None):
+            unused, kwargs = _metadata_field_spec(
+                _frame_metadata(odb, step_name, frame_index),
+                item['fieldLabel'], step_name, frame_index)
+        odb_display.setPrimaryVariable(**kwargs)
+
+
 def _rendered_file_path(output_dir, base_name, naming_template, viewport_name,
-                        view_name, extension):
+                        view_name, extension, field_name='Current',
+                        step_name='', frame_label='Current',
+                        include_field=False, include_step=False,
+                        include_frame=False):
     stem = _safe_stem(base_name)
     template = _text(naming_template) or '{name}_{view}'
+    missing = []
+    if include_field and '{field}' not in template:
+        missing.append('field')
+    if include_step and '{step}' not in template:
+        missing.append('step')
+    if include_frame and '{frame}' not in template:
+        missing.append('frame')
+    if missing:
+        prefix = '{name}' + ''.join('_{%s}' % key for key in missing)
+        if '{name}' in template:
+            template = template.replace('{name}', prefix, 1)
+        else:
+            template = prefix + '_' + template
     values = {
         'name': stem,
         'view': _safe_stem(view_name),
         'viewport': _safe_stem(viewport_name),
+        'field': _safe_stem(field_name or 'Current'),
+        'step': _safe_stem(step_name or 'Current'),
+        'frame': _safe_stem(frame_label or 'Current'),
     }
     try:
         rendered = template.format(**values)
@@ -340,6 +787,122 @@ def _rendered_file_path(output_dir, base_name, naming_template, viewport_name,
     if not rendered.lower().endswith(extension):
         rendered += extension
     return os.path.join(output_dir, rendered)
+
+
+def buildExportPlan(viewCurrent=1, viewIso=0, viewFront=0, viewBack=0,
+                    viewLeft=0, viewRight=0, viewTop=0, viewBottom=0,
+                    viewportScope=0, viewportNames='', exportMode=0,
+                    formatName='PNG', outputDir='',
+                    baseName='scientific_figure',
+                    namingTemplate='{name}_{view}', fieldOutputs='',
+                    customFieldOutputs='', stepName='', frameSelection=0,
+                    everyN=1, specifiedFrames=''):
+    """Return the same static output plan used by ``exportFigures``.
+
+    This is a read-only preflight for the GUI confirmation table.  It resolves
+    the live viewport/ODB context and the actual naming rules, but it does not
+    create directories, change viewport state, or write files.
+    """
+    selected_views = _selected_phase2a_views(
+        viewCurrent, viewIso, viewFront, viewBack, viewLeft, viewRight,
+        viewTop, viewBottom)
+    viewport_list = _viewport_names(viewportScope, viewportNames)
+    batch_plan = _build_batch_plan(
+        session.viewports[viewport_list[0]], fieldOutputs,
+        customFieldOutputs, stepName, frameSelection, everyN, specifiedFrames,
+        validate_fields=False)
+
+    requested_fields = _field_output_tokens(fieldOutputs, customFieldOutputs)
+    include_field = bool(requested_fields)
+    include_step = bool(_text(stepName))
+    include_frame = int(frameSelection) != 0
+    format_spec = _format_spec(formatName)
+    output_dir = _text(outputDir)
+    if not output_dir:
+        output_dir = os.path.join(os.getcwd(),
+                                  'ScientificFigureExporter_output')
+    output_dir = os.path.abspath(output_dir)
+
+    rows = []
+    seen_paths = {}
+
+    def append_row(batch_item, viewport_name, view_name):
+        output_path = _rendered_file_path(
+            output_dir, baseName, namingTemplate, viewport_name, view_name,
+            format_spec[3], field_name=batch_item.get('fieldName', 'Current'),
+            step_name=batch_item.get('stepName', ''),
+            frame_label=batch_item.get('frameLabel', 'Current'),
+            include_field=include_field, include_step=include_step,
+            include_frame=include_frame)
+        if output_path in seen_paths:
+            raise ValueError('Naming template produced duplicate output: %s' %
+                             output_path)
+        seen_paths[output_path] = True
+        rows.append({
+            'field': _text(batch_item.get('fieldName', 'Current')) or 'Current',
+            'step': _text(batch_item.get('stepName', '')) or 'Current',
+            'frame': _text(batch_item.get('frameLabel', 'Current')) or 'Current',
+            'viewport': _text(viewport_name),
+            'view': _text(view_name),
+            'path': output_path,
+            'exists': os.path.exists(output_path),
+        })
+
+    if int(exportMode) == 1:
+        for batch_item in batch_plan:
+            append_row(batch_item, 'Combined', 'Combined')
+    else:
+        for viewport_name in viewport_list:
+            for batch_item in batch_plan:
+                for view_name in selected_views:
+                    append_row(batch_item, viewport_name, view_name)
+    return rows
+
+
+def _write_export_plan(plan_path, rows):
+    """Write a GUI-readable plan file without changing Abaqus state."""
+    raw_path = _text(plan_path)
+    if not raw_path:
+        raise ValueError('The export plan path is empty.')
+    path = os.path.abspath(raw_path)
+    directory = os.path.dirname(path)
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    payload = json.dumps(rows, ensure_ascii=True, sort_keys=True)
+    try:
+        if isinstance(payload, unicode):
+            payload = payload.encode('utf-8')
+    except NameError:
+        pass
+    with open(path, 'wb') as stream:
+        stream.write(payload)
+    return path
+
+
+def buildFieldCatalog(stepName='', full_scan=False):
+    """Read only FieldOutput metadata in the kernel, never field values."""
+    vp = _current_viewport()
+    odb, names, current_step, current_frame, unused = _current_odb_context(vp)
+    name, index = _resolve_step_name(odb, names, stepName, current_step)
+    count = len(odb.steps[name].frames)
+    if not count:
+        raise ValueError('The selected Step contains no Frames.')
+    selected = current_frame if index == current_step else 0
+    indices = range(count) if full_scan else [selected]
+    entries = set()
+    for frame_index in indices:
+        metadata = _frame_metadata(odb, name, frame_index, refresh=True)
+        for label, info in metadata.items():
+            entries.add(label)
+            for component in info['components']:
+                entries.add(label + ', ' + component)
+            for text in info['invariants']:
+                entries.add(label + ', ' + text)
+    return {'fields': sorted(entries, key=lambda value: value.lower()),
+            'step': name, 'frameCount': count,
+            'note': ('All Frames scanned.' if full_scan else
+                     'Frame %d scanned; use Scan all Frames for sparse outputs.'
+                     % selected)}
 
 
 def _constant(name):
@@ -564,10 +1127,13 @@ def _apply_contour_policy(viewport, spectrumName, reverseSpectrum,
                  intervals != 12 or contourRange != 'Current')
     if not requested:
         return []
+    # The form disables contour controls when the target is not an active ODB
+    # contour plot.  Their default/stale values must therefore remain a no-op;
+    # do not fail an otherwise valid model or non-contour export here.
     if not _is_odb_viewport(viewport):
-        raise RuntimeError('Contour routes are currently connected for ODB viewports only.')
+        return []
     if not _is_contour_viewport(viewport):
-        raise RuntimeError('Contour routes require an active ODB contour plot.')
+        return []
     internal_name, created = _ensure_spectrum(name, reverseSpectrum)
     values = {'numIntervals': intervals}
     if internal_name is not None:
@@ -818,7 +1384,8 @@ def _create_combined_viewports(source_viewport, selected_views):
 
 
 def _export_combined_canvas(source_viewports, selected_views, output_path,
-                            width, height, format_spec, settings):
+                            width, height, format_spec, settings,
+                            batch_item=None):
     """Export a single native canvas containing the requested panels.
 
     Semantics are deliberately explicit:
@@ -850,6 +1417,7 @@ def _export_combined_canvas(source_viewports, selected_views, output_path,
                 source, selected_views)
             for viewport in canvas_viewports:
                 viewport.makeCurrent()
+                _apply_odb_batch_state(viewport, batch_item)
                 created_spectrums.extend(
                     _apply_phase2a_settings_from_dict(viewport, settings))
                 if _as_bool(settings.get('autoFit', 0)):
@@ -861,6 +1429,7 @@ def _export_combined_canvas(source_viewports, selected_views, output_path,
                 source_states.append((viewport, state))
                 viewport.makeCurrent()
                 _set_view(viewport, view_name, state)
+                _apply_odb_batch_state(viewport, batch_item)
                 created_spectrums.extend(
                     _apply_phase2a_settings_from_dict(viewport, settings))
                 if _as_bool(settings.get('autoFit', 0)):
@@ -896,13 +1465,13 @@ def _preview_view(selected_views):
 
 def _preview_thumbnail_size(width, height):
     """Scale output dimensions into the fixed in-dialog preview area."""
-    scale = min(1.0, 420.0 / float(width), 315.0 / float(height))
+    scale = min(1.0, 240.0 / float(width), 180.0 / float(height))
     return (max(1, int(round(float(width) * scale))),
             max(1, int(round(float(height) * scale))))
 
 
 def _write_ui_preview(preview_path, viewport_names, selected_views,
-                      export_mode, width, height, settings):
+                      export_mode, width, height, settings, batch_item=None):
     """Render the first output or combined canvas as a temporary PNG."""
     preview_path = _text(preview_path)
     if not preview_path:
@@ -922,7 +1491,7 @@ def _write_ui_preview(preview_path, viewport_names, selected_views,
                             for name in viewport_names]
         return _export_combined_canvas(
             source_viewports, selected_views, preview_path, preview_width,
-            preview_height, format_spec, settings)
+            preview_height, format_spec, settings, batch_item=batch_item)
 
     # Separate-file export can produce many files.  The UI shows the first
     # one (first live viewport, then first selected view) as a representative
@@ -933,6 +1502,7 @@ def _write_ui_preview(preview_path, viewport_names, selected_views,
     created_spectrums = []
     try:
         viewport.makeCurrent()
+        _apply_odb_batch_state(viewport, batch_item)
         created_spectrums = _apply_phase2a_settings_from_dict(
             viewport, settings)
         _export_one_image(viewport, selected_views[0], preview_path,
@@ -1001,9 +1571,11 @@ def exportFigures(action='export',
                   customAspect='4:3', lockRatio=0, resolutionMode=0,
                   width=1600, height=1200, physicalWidthMm=160.0, dpi=300,
                   formatName='PNG', outputDir='',
-                  baseName='scientific_figure',
-                  namingTemplate='{name}_{view}', previewPath=''):
-    """Phase 2A multi-view raster/vector command on the existing plug-in.
+                   baseName='scientific_figure',
+                   namingTemplate='{name}_{view}', previewPath='', planPath='',
+                   fieldOutputs='', customFieldOutputs='', stepName='',
+                  frameSelection=0, everyN=1, specifiedFrames=''):
+    """Multi-view export command with optional static ODB batching.
 
     Connected in this revision: selected standard views, current/all open
     viewport routing, ODB display/contour/annotation controls, PNG/JPG/TIFF/SVG
@@ -1011,11 +1583,29 @@ def exportFigures(action='export',
     directory/template naming, in-dialog rendered preview/reset, and
     solid/gradient/no-viewport background policies, plus native combined-canvas
     export. JPG is rendered through Abaqus PNG and converted with Windows GDI+.
+    Optional Field Output and Step/Frame selections generate a static batch;
+    the in-dialog preview represents the first batch combination.
     """
     action = _text(action).lower() or 'export'
     if action == 'reset':
         _reset_preview_states()
         return 'Preview reset.'
+    if action in ('fields', 'fields_all'):
+        return _write_export_plan(
+            planPath, buildFieldCatalog(stepName, action == 'fields_all'))
+    if action == 'plan':
+        rows = buildExportPlan(
+            viewCurrent=viewCurrent, viewIso=viewIso, viewFront=viewFront,
+            viewBack=viewBack, viewLeft=viewLeft, viewRight=viewRight,
+            viewTop=viewTop, viewBottom=viewBottom,
+            viewportScope=viewportScope, viewportNames=viewportNames,
+            exportMode=exportMode, formatName=formatName,
+            outputDir=outputDir, baseName=baseName,
+            namingTemplate=namingTemplate, fieldOutputs=fieldOutputs,
+            customFieldOutputs=customFieldOutputs, stepName=stepName,
+            frameSelection=frameSelection, everyN=everyN,
+            specifiedFrames=specifiedFrames)
+        return _write_export_plan(planPath, rows)
     if action not in ('export', 'preview'):
         raise ValueError('Unknown exporter action: %s' % action)
 
@@ -1035,6 +1625,18 @@ def exportFigures(action='export',
         manualMax, backgroundMode, backgroundTop, backgroundBottom, exportMode,
         formatName)
     viewport_list = _viewport_names(viewportScope, viewportNames)
+    batch_plan = _build_batch_plan(
+        session.viewports[viewport_list[0]], fieldOutputs,
+        customFieldOutputs, stepName, frameSelection, everyN, specifiedFrames,
+        first_only=(action == 'preview'))
+    for index, viewport_name in enumerate(viewport_list):
+        _validate_batch_plan(
+            session.viewports[viewport_name], batch_plan,
+            validate_fields=(index > 0))
+    requested_fields = _field_output_tokens(fieldOutputs, customFieldOutputs)
+    include_field = bool(requested_fields)
+    include_step = bool(_text(stepName))
+    include_frame = int(frameSelection) != 0
     format_spec = _format_spec(formatName)
     width, height = _target_image_size(
         aspect, customAspect, lockRatio, resolutionMode, width, height,
@@ -1089,12 +1691,13 @@ def exportFigures(action='export',
             if _text(previewPath):
                 preview_output = _write_ui_preview(
                     previewPath, viewport_list, selected_views, exportMode,
-                    width, height, settings)
+                    width, height, settings, batch_item=batch_plan[0])
 
             for viewport_name in viewport_list:
                 viewport = session.viewports[viewport_name]
                 payload = _PREVIEW_STATES[viewport_name]
                 viewport.makeCurrent()
+                _apply_odb_batch_state(viewport, batch_plan[0])
                 payload['createdSpectrums'] = _apply_phase2a_settings(
                     viewport, renderStyle, visibleEdges,
                     translucencyEnabled, translucency, legend, compass, triad,
@@ -1121,45 +1724,65 @@ def exportFigures(action='export',
     original_viewport_name = session.currentViewportName
     try:
         if int(exportMode) == 1:
-            output_path = _rendered_file_path(
-                output_dir, baseName, namingTemplate, 'Combined', 'Combined',
-                format_spec[3])
-            if output_path in seen_paths:
-                raise ValueError('Naming template produced duplicate output: %s' %
-                                 output_path)
-            seen_paths[output_path] = True
-            outputs.append(_export_combined_canvas(
-                [session.viewports[name] for name in viewport_list],
-                selected_views, output_path, width, height, format_spec,
-                settings))
+            for batch_item in batch_plan:
+                output_path = _rendered_file_path(
+                    output_dir, baseName, namingTemplate, 'Combined',
+                    'Combined', format_spec[3],
+                    field_name=batch_item.get('fieldName', 'Current'),
+                    step_name=batch_item.get('stepName', ''),
+                    frame_label=batch_item.get('frameLabel', 'Current'),
+                    include_field=include_field,
+                    include_step=include_step,
+                    include_frame=include_frame)
+                if output_path in seen_paths:
+                    raise ValueError('Naming template produced duplicate output: %s' %
+                                     output_path)
+                seen_paths[output_path] = True
+                outputs.append(_export_combined_canvas(
+                    [session.viewports[name] for name in viewport_list],
+                    selected_views, output_path, width, height, format_spec,
+                    settings, batch_item=batch_item))
         else:
             for viewport_name in viewport_list:
                 if viewport_name not in session.viewports.keys():
                     raise ValueError('Viewport not found: %s' % viewport_name)
                 viewport = session.viewports[viewport_name]
                 state = snapshot(session, viewport)
-                created_spectrums = []
                 try:
                     viewport.makeCurrent()
-                    created_spectrums = _apply_phase2a_settings_from_dict(
-                        viewport, settings)
-                    for view_name in selected_views:
-                        output_path = _rendered_file_path(
-                            output_dir, baseName, namingTemplate, viewport_name,
-                            view_name, format_spec[3])
-                        if output_path in seen_paths:
-                            raise ValueError('Naming template produced duplicate output: %s' %
-                                             output_path)
-                        seen_paths[output_path] = True
-                        _export_one_image(viewport, view_name, output_path,
-                                          width, height, format_spec,
-                                          autoFit=autoFit,
-                                          resolutionDpi=settings.get(
-                                              'resolutionDpi', 0))
-                        outputs.append(output_path)
+                    for batch_item in batch_plan:
+                        created_spectrums = []
+                        try:
+                            _apply_odb_batch_state(viewport, batch_item)
+                            created_spectrums = _apply_phase2a_settings_from_dict(
+                                viewport, settings)
+                            for view_name in selected_views:
+                                output_path = _rendered_file_path(
+                                    output_dir, baseName, namingTemplate,
+                                    viewport_name, view_name, format_spec[3],
+                                    field_name=batch_item.get(
+                                        'fieldName', 'Current'),
+                                    step_name=batch_item.get('stepName', ''),
+                                    frame_label=batch_item.get(
+                                        'frameLabel', 'Current'),
+                                    include_field=include_field,
+                                    include_step=include_step,
+                                    include_frame=include_frame)
+                                if output_path in seen_paths:
+                                    raise ValueError(
+                                        'Naming template produced duplicate output: %s' %
+                                        output_path)
+                                seen_paths[output_path] = True
+                                _export_one_image(
+                                    viewport, view_name, output_path, width,
+                                    height, format_spec, autoFit=autoFit,
+                                    resolutionDpi=settings.get(
+                                        'resolutionDpi', 0))
+                                outputs.append(output_path)
+                        finally:
+                            _delete_created_spectrums(created_spectrums)
                 finally:
                     restore(session, viewport, state)
-                    _delete_created_spectrums(created_spectrums)
     except Exception as error:
         traceback.print_exc()
         raise RuntimeError(_error_message(error))

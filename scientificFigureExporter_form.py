@@ -9,6 +9,7 @@ Abaqus-native view, annotation, display, and export routes.
 from __future__ import absolute_import
 
 import os
+import json
 import tempfile
 import uuid
 
@@ -123,6 +124,142 @@ def _is_contour_viewport(viewport):
         return False
 
 
+def _field_output_request_key(value):
+    """Normalize a field label for matching saved GUI selections."""
+    try:
+        if isinstance(value, unicode):
+            value = value.encode('utf-8')
+    except NameError:
+        pass
+    compact = str(value).strip().lower().replace(' ', '')
+    if compact == 's,mises(avg:75%)':
+        return 's,mises'
+    if compact == 's':
+        return 's,mises'
+    if compact == 'u':
+        return 'u,magnitude'
+    return compact
+
+
+class OdbFieldOutputSelector(AFXDialog):
+    """Modal extended-selection list populated from one ODB Step."""
+
+    def __init__(self, owner, field_names, selected_names,
+                 apply_selector, step_name, frame_count,
+                 scan_selector=None, scan_note=''):
+        self._field_names = list(field_names)
+        self._field_list = None
+
+        AFXDialog.__init__(
+            self, owner, 'Select ODB Field Outputs', 0,
+            DECOR_RESIZE | DIALOG_ACTIONS_SEPARATOR | DIALOG_UNPOST_DESTROY)
+
+        body = FXVerticalFrame(self, LAYOUT_FILL_X | LAYOUT_FILL_Y,
+                               0, 0, 0, 0, 8, 8, 8, 8, 6, 6)
+        FXLabel(
+            body,
+            _format_ui_text(
+                'Available outputs in Step %s (%d Frames).',
+                (step_name, frame_count)))
+        FXLabel(
+            body,
+            'Drag to select a range; use Ctrl/Shift for extended selection.')
+        FXLabel(body, 'Rows such as S, S11 or S, Mises select a component or invariant.')
+        if scan_note:
+            FXLabel(body, _afx_string(scan_note))
+
+        self._field_list = FXList(
+            body, 12, None, 0,
+            LIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y)
+        selected_keys = set(
+            _field_output_request_key(value) for value in selected_names)
+        for index, field_name in enumerate(self._field_names):
+            self._field_list.appendItem(_afx_string(field_name))
+            if _field_output_request_key(field_name) in selected_keys:
+                self._field_list.selectItem(index)
+
+        self.appendActionButton('Use Selected', owner, apply_selector)
+        if scan_selector is not None:
+            self.appendActionButton('Scan all Frames', owner, scan_selector)
+        self.appendActionButton(self.CANCEL)
+
+    def selected_field_outputs(self):
+        selected = []
+        for index, field_name in enumerate(self._field_names):
+            try:
+                if self._field_list.isItemSelected(index):
+                    selected.append(field_name)
+            except Exception:
+                pass
+        return selected
+
+
+class ExportPlanDialog(AFXDialog):
+    """Read-only confirmation table for the files about to be exported."""
+
+    def __init__(self, owner, rows, confirm_selector, cancel_selector):
+        self._rows = list(rows)
+        AFXDialog.__init__(
+            self, owner, 'Export plan', 0,
+            DECOR_RESIZE | DIALOG_ACTIONS_SEPARATOR | DIALOG_UNPOST_DESTROY)
+
+        body = FXVerticalFrame(self, LAYOUT_FILL_X | LAYOUT_FILL_Y,
+                               0, 0, 0, 0, 8, 8, 8, 8, 6, 6)
+        existing_count = len([row for row in self._rows
+                              if row.get('exists', False)])
+        if existing_count:
+            summary = _format_ui_text(
+                '%d image(s) will be exported. %d existing output(s) will be overwritten.',
+                (len(self._rows), existing_count))
+        else:
+            summary = _format_ui_text(
+                '%d image(s) will be exported. No existing output was found.',
+                (len(self._rows),))
+        FXLabel(body, summary)
+        FXLabel(body,
+                'Review the resolved Field / Step / Frame / View / filename list, '
+                'then confirm Export.')
+
+        table_frame = FXVerticalFrame(
+            body, FRAME_SUNKEN | FRAME_THICK |
+            LAYOUT_FILL_X | LAYOUT_FILL_Y,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        total_rows = len(self._rows) + 1
+        visible_rows = min(14, total_rows)
+        self._table = AFXTable(table_frame, visible_rows, 6,
+                               total_rows, 6)
+        self._table.setLeadingRows(1)
+        self._table.setLeadingRowLabels(
+            'No.\tField\tStep\tFrame\tViewport / View\tOutput file')
+        try:
+            self._table.showHorizontalGrid(True)
+            self._table.showVerticalGrid(True)
+            self._table.setColumnWidth(0, 42)
+            self._table.setColumnWidth(1, 100)
+            self._table.setColumnWidth(2, 150)
+            self._table.setColumnWidth(3, 80)
+            self._table.setColumnWidth(4, 180)
+            self._table.setColumnWidth(5, 420)
+        except Exception:
+            pass
+
+        for index, row in enumerate(self._rows):
+            values = (
+                str(index + 1),
+                row.get('field', 'Current'),
+                row.get('step', 'Current'),
+                row.get('frame', 'Current'),
+                '%s / %s' % (row.get('viewport', ''), row.get('view', '')),
+                row.get('path', ''),
+            )
+            for column, value in enumerate(values):
+                self._table.setItemText(index + 1, column,
+                                        _afx_string(value))
+
+        self.appendActionButton('Export', owner, confirm_selector)
+        self.appendActionButton('Cancel', owner, cancel_selector)
+
+
 def _fx_color_to_hex(color):
     """Convert an Abaqus FOX FXColor value to the kernel's #RRGGBB text."""
     try:
@@ -147,8 +284,11 @@ class ScientificFigureExporterDB(AFXDataDialog):
      ID_COMBO_EDGES, ID_COMBO_FORMAT, ID_COMBO_EXPORT_MODE, ID_COLOR_TOP,
      ID_COLOR_BOTTOM, ID_LIVE_PREVIEW_TOGGLE,
      ID_LIVE_PREVIEW_TIMER, ID_PRESET_JOURNAL,
-     ID_PRESET_PRESENTATION] = range(AFXDataDialog.ID_LAST,
-                                     AFXDataDialog.ID_LAST + 23)
+     ID_PRESET_PRESENTATION, ID_COMBO_FRAME_MODE,
+      ID_FIELD_SELECTION, ID_FIELD_SELECTION_APPLY,
+      ID_FIELD_SELECTION_SCAN, ID_EXPORT_PLAN_CONFIRM,
+      ID_EXPORT_PLAN_CANCEL, ID_UI_SCALE] = range(
+          AFXDataDialog.ID_LAST, AFXDataDialog.ID_LAST + 30)
 
     def __init__(self, form):
         self.form = form
@@ -174,6 +314,17 @@ class ScientificFigureExporterDB(AFXDataDialog):
         self._custom_aspect_field = None
         self._publication_width_field = None
         self._dpi_field = None
+        self._field_selector_dialog = None
+        self._export_plan_dialog = None
+        self._field_selection_summary = None
+        self._batch_always_widgets = []
+        self._frame_every_widgets = []
+        self._frame_specified_widgets = []
+        self._batch_status = None
+        self._ui_scale_combo = None
+        self._ui_font_targets = []
+        self._ui_scale = 'compact'
+        self._ui_scale_applied = None
         self._figure_preview_label = None
         self._figure_preview_status = None
         self._figure_preview_icon = None
@@ -182,6 +333,7 @@ class ScientificFigureExporterDB(AFXDataDialog):
         self._preview_temp_dir = os.path.abspath(os.path.join(
             tempfile.gettempdir(), 'ScientificFigureExporter'))
         self._owned_preview_paths = {}
+        self._owned_plan_paths = {}
         self._live_preview_enabled = True
         self._live_preview_dirty = False
         self._action_in_flight = False
@@ -209,11 +361,18 @@ class ScientificFigureExporterDB(AFXDataDialog):
             FXHorizontalSeparator(footer, LAYOUT_FILL_X)
         except Exception:
             pass
+        footer_row = FXHorizontalFrame(footer, LAYOUT_FILL_X)
+        self._ui_scale_combo = AFXComboBox(
+            footer_row, 14, 2, 'UI size:', self, self.ID_UI_SCALE,
+            LAYOUT_LEFT)
+        self._ui_scale_combo.appendItem('Compact')
+        self._ui_scale_combo.appendItem('Standard')
+        self._ui_scale_combo.setCurrentItem(0)
         self._footer_label = FXLabel(
-            footer,
+            footer_row,
             'Author: sysu@Liu Renjie | Contact email: '
             'liurj6@mail2.sysu.edu.cn',
-            None, JUSTIFY_CENTER_X | LAYOUT_FILL_X)
+            None, JUSTIFY_LEFT | LAYOUT_FILL_X)
         try:
             self._footer_label.setFont(getAFXFont(FONT_SMALL))
         except Exception:
@@ -242,6 +401,18 @@ class ScientificFigureExporterDB(AFXDataDialog):
                   ScientificFigureExporterDB.onCmdJournalPreset)
         FXMAPFUNC(self, SEL_COMMAND, self.ID_PRESET_PRESENTATION,
                   ScientificFigureExporterDB.onCmdPresentationPreset)
+        FXMAPFUNC(self, SEL_COMMAND, self.ID_FIELD_SELECTION,
+                  ScientificFigureExporterDB.onCmdFieldSelection)
+        FXMAPFUNC(self, SEL_COMMAND, self.ID_FIELD_SELECTION_APPLY,
+                  ScientificFigureExporterDB.onCmdApplyFieldSelection)
+        FXMAPFUNC(self, SEL_COMMAND, self.ID_FIELD_SELECTION_SCAN,
+                  ScientificFigureExporterDB.onCmdScanAllFieldOutputs)
+        FXMAPFUNC(self, SEL_COMMAND, self.ID_EXPORT_PLAN_CONFIRM,
+                  ScientificFigureExporterDB.onCmdConfirmExportPlan)
+        FXMAPFUNC(self, SEL_COMMAND, self.ID_EXPORT_PLAN_CANCEL,
+                  ScientificFigureExporterDB.onCmdCancelExportPlan)
+        FXMAPFUNC(self, SEL_COMMAND, self.ID_UI_SCALE,
+                  ScientificFigureExporterDB.onCmdUIScale)
         FXMAPFUNC(self, SEL_COMMAND, self.ID_LIVE_PREVIEW_TOGGLE,
                   ScientificFigureExporterDB.onCmdToggleLivePreview)
         FXMAPFUNC(self, SEL_TIMEOUT, self.ID_LIVE_PREVIEW_TIMER,
@@ -255,6 +426,8 @@ class ScientificFigureExporterDB(AFXDataDialog):
         self._update_background_widgets()
         self._update_calculated_size()
         self._last_preview_signature = self._preview_signature()
+        self._capture_ui_fonts()
+        self._apply_ui_scale(resize_window=False)
 
     # ------------------------------------------------------------------
     # Tab construction
@@ -294,11 +467,55 @@ class ScientificFigureExporterDB(AFXDataDialog):
                         ('Separate files', 'Combined canvas'),
                         self.ID_COMBO_EXPORT_MODE, 0, (0, 1))
         FXLabel(viewport_box,
-                'For existing subplots choose All open viewports + Combined canvas. '
-                'Current alone uses all live open viewports; multiple selected '
-                'views become one panel per view.')
+                'Existing subplots: choose All open viewports + Combined canvas.\n'
+                'Current viewport uses the live layout; multiple selected views\n'
+                'become one panel per view.')
         self._viewport_status = FXLabel(
             viewport_box, 'Viewport query will refresh when the dialog opens.')
+
+        batch_box = FXGroupBox(page, 'ODB batch export',
+                               FRAME_GROOVE | LAYOUT_FILL_X)
+        FXLabel(batch_box,
+                'Choose variables detected in the selected ODB Step.\n'
+                'Leave blank to keep the current output:')
+        field_row = FXHorizontalFrame(batch_box, LAYOUT_FILL_X)
+        field_button = FXButton(
+            field_row, 'Choose Field Outputs...', tgt=self,
+            sel=self.ID_FIELD_SELECTION)
+        self._register_odb_widget(field_button)
+        self._batch_always_widgets.append(field_button)
+        self._field_selection_summary = FXLabel(
+            field_row, 'No field filter (keep current output).', None,
+            JUSTIFY_LEFT | LAYOUT_FILL_X)
+
+        frame_row = FXHorizontalFrame(batch_box, LAYOUT_FILL_X)
+        frame_combo = self._add_combo(
+            frame_row, 'Frame selection:', self.form.frameSelectionKw,
+            ('Current', 'First', 'Last', 'Every N', 'Specified'),
+            self.ID_COMBO_FRAME_MODE, 0, (0, 1, 2, 3, 4))
+        self._register_odb_widget(frame_combo)
+        step_field = AFXTextField(
+            frame_row, 18, 'Step (blank=current):',
+            self.form.stepNameKw, 0)
+        self._register_odb_widget(step_field)
+        self._batch_always_widgets.extend([frame_combo, step_field])
+
+        every_row = FXHorizontalFrame(batch_box, LAYOUT_FILL_X)
+        every_field = AFXTextField(
+            every_row, 10, 'Every N:', self.form.everyNKw, 0)
+        self._register_odb_widget(every_field)
+        self._frame_every_widgets.append(every_field)
+
+        specified_row = FXHorizontalFrame(batch_box, LAYOUT_FILL_X)
+        specified_field = AFXTextField(
+            specified_row, 24, 'Frame indices (0-based):',
+            self.form.specifiedFramesKw, 0)
+        self._register_odb_widget(specified_field)
+        self._frame_specified_widgets.append(specified_field)
+        self._batch_status = FXLabel(
+            batch_box,
+            'Static batch only. Every N includes the final Frame.\n'
+            'Preview shows the first field/frame combination.')
 
         display_box = FXGroupBox(page, 'Display policy',
                                  FRAME_GROOVE | LAYOUT_FILL_X)
@@ -349,8 +566,8 @@ class ScientificFigureExporterDB(AFXDataDialog):
                                    CHECKBUTTON_NORMAL)
             if label in ('Title block', 'State block'):
                 self._register_odb_widget(widget)
-        FXLabel(ann_box, 'Legend/Triad/Title/State require ODB viewports. '
-                'Compass and existing Text / arrows can be toggled in any '
+        FXLabel(ann_box, 'Legend/Triad/Title/State require ODB viewports.\n'
+                'Compass and existing Text / arrows can be toggled in any\n'
                 'viewport; the original annotation state is restored.')
 
     def _build_contour_tab(self, tabs):
@@ -370,8 +587,8 @@ class ScientificFigureExporterDB(AFXDataDialog):
         self._register_contour_widget(reverse)
         self._contour_status = FXLabel(
             spectrum_box,
-            'ODB contour controls are enabled when all target viewports are '
-            'in an active contour plot.')
+            'ODB contour controls are enabled when all target viewports\n'
+            'are in an active contour plot.')
         preview_box = FXGroupBox(spectrum_box, 'Preview',
                                  FRAME_GROOVE | LAYOUT_FILL_X)
         self._build_palette_preview(preview_box, 'Abaqus Default')
@@ -421,8 +638,8 @@ class ScientificFigureExporterDB(AFXDataDialog):
             self.ID_COLOR_BOTTOM: self.form.backgroundBottomKw,
         }
         self._background_color_widgets = [top_button, bottom_button]
-        FXLabel(bg_box, 'Solid uses Top; Gradient uses Top and Bottom. '
-                'Preview applies temporarily; Export restores the original '
+        FXLabel(bg_box, 'Solid uses Top; Gradient uses Top and Bottom.\n'
+                'Preview applies temporarily; Export restores the original\n'
                 'viewport/session background afterwards.')
         preset_row = FXHorizontalFrame(page, LAYOUT_FILL_X)
         preset_button = FXButton(preset_row, 'Journal light preset',
@@ -471,29 +688,30 @@ class ScientificFigureExporterDB(AFXDataDialog):
                         ('PNG', 'JPG', 'TIFF', 'SVG'),
                         self.ID_COMBO_FORMAT, 0)
         FXLabel(format_box,
-                'PNG, JPG, TIFF, and SVG are available. JPG uses the Windows '
-                'encoder (quality 95); transparent areas become white. EPS '
+                'PNG, JPG, TIFF, and SVG are available. JPG uses the Windows\n'
+                'encoder (quality 95); transparent areas become white. EPS\n'
                 'is not exposed because its export did not return reliably.')
 
         output_box = FXGroupBox(page, 'File naming',
                                 FRAME_GROOVE | LAYOUT_FILL_X)
         aligner = AFXVerticalAligner(output_box)
         dir_row = FXHorizontalFrame(aligner, LAYOUT_FILL_X)
-        AFXTextField(dir_row, 46, 'Output directory:',
+        AFXTextField(dir_row, 24, 'Output directory:',
                      self.form.outputDirKw, 0)
         FXButton(dir_row, 'Browse...', tgt=self, sel=self.ID_BROWSE)
-        AFXTextField(aligner, 28, 'Base name:', self.form.baseNameKw, 0)
-        AFXTextField(aligner, 32, 'Naming template:',
+        AFXTextField(aligner, 16, 'Base name:', self.form.baseNameKw, 0)
+        AFXTextField(aligner, 18, 'Naming template:',
                      self.form.namingTemplateKw, 0)
         FXLabel(output_box,
-                'Fields: {name}, {view}, {viewport}. Invalid Windows '
-                'filename characters are sanitized by the kernel.')
+                'Fields: {name}, {field}, {step}, {frame}, {view}, {viewport}.\n'
+                'Batch fields are inserted automatically; invalid Windows\n'
+                'filename characters are sanitized.')
 
     def _build_figure_preview_pane(self, parent):
         pane = FXVerticalFrame(parent,
                                FRAME_GROOVE | LAYOUT_FIX_WIDTH |
                                LAYOUT_FILL_Y,
-                               0, 0, 480, 0, 8, 8, 8, 8, 6, 6)
+                               0, 0, 270, 0, 5, 5, 5, 5, 4, 4)
         preview_box = FXGroupBox(pane, 'Live figure preview',
                                  FRAME_GROOVE | LAYOUT_FILL_X |
                                  LAYOUT_FILL_Y)
@@ -501,7 +719,7 @@ class ScientificFigureExporterDB(AFXDataDialog):
             preview_box, 'Preview will appear here after the first render.',
             None, JUSTIFY_CENTER_X | JUSTIFY_CENTER_Y |
             LAYOUT_FIX_WIDTH | LAYOUT_FIX_HEIGHT,
-            0, 0, 440, 340, 8, 8, 8, 8)
+            0, 0, 240, 180, 5, 5, 5, 5)
         self._figure_preview_status = FXLabel(
             preview_box, 'Waiting for the first preview...',
             None, JUSTIFY_LEFT | LAYOUT_FILL_X)
@@ -512,10 +730,11 @@ class ScientificFigureExporterDB(AFXDataDialog):
         FXLabel(preview_box,
                 'Automatically re-render the preview after settings change.')
         FXLabel(preview_box,
-                'PNG thumbnail (max 420 x 315 px).\n'
+                'PNG thumbnail (max 240 x 180 px).\n'
                 'Combined canvas shows all panels.\n'
                 'Separate files show first selected view\n'
-                'of first target viewport.')
+                'of first target viewport.\n'
+                'For a batch, this is the first field/frame.')
 
     def _set_ui_text(self, widget, source, *args):
         if widget is None:
@@ -525,12 +744,90 @@ class ScientificFigureExporterDB(AFXDataDialog):
         except Exception:
             pass
 
+    def _capture_ui_fonts(self):
+        """Capture native widget fonts before applying the compact preset."""
+        targets = []
+        visited = {}
+
+        def visit(widget):
+            if widget is None or id(widget) in visited:
+                return
+            visited[id(widget)] = True
+            try:
+                font = widget.getFont()
+                if font is not None:
+                    targets.append((widget, font))
+            except Exception:
+                pass
+            try:
+                count = int(widget.numChildren())
+            except Exception:
+                count = 0
+            for index in range(count):
+                try:
+                    visit(widget.childAtIndex(index))
+                except Exception:
+                    pass
+
+        visit(self)
+        self._ui_font_targets = targets
+
+    def _apply_ui_scale(self, resize_window=True):
+        """Apply a small native-font density preset without changing globals."""
+        compact = self._ui_scale == 'compact'
+        try:
+            compact_font = getAFXFont(FONT_SMALL)
+        except Exception:
+            compact_font = None
+        for widget, original_font in self._ui_font_targets:
+            try:
+                if compact and compact_font is not None:
+                    widget.setFont(compact_font)
+                else:
+                    widget.setFont(original_font)
+            except Exception:
+                pass
+        try:
+            self.recalc()
+        except Exception:
+            pass
+
+        # The dialog remains DECOR_RESIZE, so the user can still drag it after
+        # choosing a preset.  Keep the native height required by the current
+        # content: capping it below that height makes the lower controls appear
+        # collapsed until the user drags the window edge.
+        if resize_window:
+            try:
+                default_width = int(self.getDefaultWidth())
+                default_height = int(self.getDefaultHeight())
+                if compact:
+                    width_cap = 1120
+                else:
+                    width_cap = 1320
+                width = min(default_width, width_cap)
+                height = default_height
+                if width > 0 and height > 0:
+                    self.resize(width, height)
+            except Exception:
+                pass
+        self._ui_scale_applied = self._ui_scale
+
+    def onCmdUIScale(self, sender, sel, ptr):
+        try:
+            index = self._ui_scale_combo.getCurrentItem()
+        except Exception:
+            index = 0
+        self._ui_scale = 'standard' if index == 1 else 'compact'
+        self._apply_ui_scale(resize_window=True)
+        return 1
+
     def _preview_signature(self):
         names = (
             'viewCurrentKw', 'viewIsoKw', 'viewFrontKw', 'viewBackKw',
             'viewLeftKw', 'viewRightKw', 'viewTopKw', 'viewBottomKw',
             'autoFitKw',
-            'viewportScopeKw', 'exportModeKw', 'renderStyleKw',
+            'viewportScopeKw', 'exportModeKw',
+            'renderStyleKw',
             'visibleEdgesKw', 'translucencyEnabledKw', 'translucencyKw',
             'legendKw', 'compassKw', 'triadKw', 'titleBlockKw',
             'stateBlockKw', 'textArrowsKw', 'spectrumNameKw',
@@ -540,7 +837,9 @@ class ScientificFigureExporterDB(AFXDataDialog):
             'customAspectKw', 'lockRatioKw', 'resolutionModeKw',
             'widthKw', 'heightKw', 'physicalWidthMmKw', 'dpiKw',
             'formatNameKw', 'outputDirKw', 'baseNameKw',
-            'namingTemplateKw')
+            'namingTemplateKw', 'fieldOutputsKw', 'customFieldOutputsKw',
+            'stepNameKw', 'frameSelectionKw', 'everyNKw',
+            'specifiedFramesKw')
         values = []
         for name in names:
             try:
@@ -641,6 +940,7 @@ class ScientificFigureExporterDB(AFXDataDialog):
             except Exception:
                 pass
         self._update_contour_widgets()
+        self._update_batch_widgets()
         if self._contour_status is not None:
             if self._is_contour_context:
                 self._set_ui_text(
@@ -675,6 +975,36 @@ class ScientificFigureExporterDB(AFXDataDialog):
             except Exception:
                 pass
 
+    def _update_batch_widgets(self):
+        try:
+            mode = int(self.form.frameSelectionKw.getValue())
+        except Exception:
+            mode = 0
+        for widget in self._batch_always_widgets:
+            try:
+                if self._is_odb_context:
+                    widget.enable()
+                else:
+                    widget.disable()
+            except Exception:
+                pass
+        for widget in self._frame_every_widgets:
+            try:
+                if self._is_odb_context and mode == 3:
+                    widget.enable()
+                else:
+                    widget.disable()
+            except Exception:
+                pass
+        for widget in self._frame_specified_widgets:
+            try:
+                if self._is_odb_context and mode == 4:
+                    widget.enable()
+                else:
+                    widget.disable()
+            except Exception:
+                pass
+
     def _update_background_widgets(self):
         """Enable native color buttons only for modes that consume colors."""
         try:
@@ -696,7 +1026,7 @@ class ScientificFigureExporterDB(AFXDataDialog):
 
     def _add_combo(self, parent, label, keyword, values, combo_id,
                    default_index, keyword_values=None):
-        combo = AFXComboBox(parent, 24, min(8, len(values)), label, self,
+        combo = AFXComboBox(parent, 18, min(6, len(values)), label, self,
                             combo_id, LAYOUT_FILL_X)
         for value in values:
             combo.appendItem(value)
@@ -792,7 +1122,133 @@ class ScientificFigureExporterDB(AFXDataDialog):
             self._update_background_widgets()
         if combo_id == self.ID_COMBO_SCOPE:
             self._refresh_viewports()
+        if combo_id == self.ID_COMBO_FRAME_MODE:
+            self._update_batch_widgets()
         self._update_calculated_size()
+        return 1
+
+    def onCmdFieldSelection(self, sender, sel, ptr):
+        if not self._is_odb_context:
+            self._set_ui_text(
+                self._field_selection_summary,
+                'Field selection requires a viewport displaying an ODB.')
+            return 1
+
+        return self._issue_field_catalog(False)
+
+    def _issue_field_catalog(self, full_scan):
+        """Use the existing asynchronous command route instead of GUI proxies."""
+        if self._action_in_flight:
+            self._set_ui_text(self._field_selection_summary,
+                              'A command is running. Please wait.')
+            return 1
+        self._cancel_live_preview_timeout()
+        path = os.path.join(self._preview_temp_dir,
+                            'export_plan_%s.json' % uuid.uuid4().hex)
+        if not self._track_owned_plan(path):
+            return 1
+        self.form.actionKw.setValue('fields_all' if full_scan else 'fields')
+        self.form.planPathKw.setValue(path)
+        self.form._pending_export_plan_path = path
+        self.form._pending_field_catalog = True
+        self._set_ui_text(self._field_selection_summary,
+                          'Reading field components in the Abaqus kernel...')
+        self._action_in_flight = True
+        try:
+            if not os.path.isdir(self._preview_temp_dir):
+                os.makedirs(self._preview_temp_dir)
+            self.form.issueCommands()
+        except Exception as error:
+            self._action_in_flight = False
+            self.form._pending_export_plan_path = None
+            self.form._pending_field_catalog = False
+            self._remove_owned_plan(path)
+            self._set_ui_text(self._field_selection_summary,
+                              'Could not read Field Outputs: %s', error)
+        return 1
+
+    def _show_field_catalog_from_path(self, path):
+        try:
+            with open(path, 'rb') as stream:
+                catalog = json.load(stream)
+            # json.load returns Unicode strings in Python 2. Keep any selector
+            # creation error visible instead of overwriting it with the count.
+            self._update_field_selection_summary()
+            self._open_field_selector(catalog['fields'], catalog['step'],
+                                      catalog['frameCount'], catalog['note'])
+        except Exception as error:
+            self._set_ui_text(self._field_selection_summary,
+                              'Could not read Field Outputs: %s', error)
+        finally:
+            self.form.planPathKw.setValue('')
+            self._remove_owned_plan(path)
+
+    def _selected_field_names(self):
+        selected_names = []
+        for keyword in (self.form.fieldOutputsKw,
+                        self.form.customFieldOutputsKw):
+            try:
+                value = keyword.getValue()
+            except Exception:
+                value = ''
+            try:
+                if isinstance(value, unicode):
+                    value = value.encode('utf-8')
+            except NameError:
+                pass
+            for token in str(value).split('|'):
+                token = token.strip()
+                if token:
+                    selected_names.append(token)
+        return selected_names
+
+    def _open_field_selector(self, field_names, step_name, frame_count,
+                             scan_note):
+        try:
+            selector = OdbFieldOutputSelector(
+                self, field_names, self._selected_field_names(),
+                self.ID_FIELD_SELECTION_APPLY, step_name, frame_count,
+                self.ID_FIELD_SELECTION_SCAN, scan_note)
+            self._field_selector_dialog = selector
+            selector.create()
+            # The posted dialog can outlive this callback; keep its reference
+            # until the user applies the selection or opens it again.
+            selector.showModal(self)
+        except Exception as error:
+            self._field_selector_dialog = None
+            self._set_ui_text(
+                self._field_selection_summary,
+                'Could not open the Field Output selector: %s', error)
+        return 1
+
+    def onCmdScanAllFieldOutputs(self, sender, sel, ptr):
+        """Opt into the complete Step scan after the fast selector opens."""
+        old_selector = self._field_selector_dialog
+        if old_selector is not None:
+            selected = old_selector.selected_field_outputs()
+            self.form.fieldOutputsKw.setValue('|'.join(selected))
+            self.form.customFieldOutputsKw.setValue('')
+            old_selector.hide()
+            self._field_selector_dialog = None
+        return self._issue_field_catalog(True)
+
+    def onCmdApplyFieldSelection(self, sender, sel, ptr):
+        selector = self._field_selector_dialog
+        if selector is None:
+            return 1
+        try:
+            selected = selector.selected_field_outputs()
+            field_text = '|'.join([str(value) for value in selected])
+            self.form.fieldOutputsKw.setValue(field_text)
+            self.form.customFieldOutputsKw.setValue('')
+            self._update_field_selection_summary()
+            selector.hide()
+            self._field_selector_dialog = None
+            self._schedule_live_preview()
+        except Exception as error:
+            self._set_ui_text(
+                self._field_selection_summary,
+                'Could not apply Field Output selection: %s', error)
         return 1
 
     def onCmdBrowse(self, sender, sel, ptr):
@@ -898,6 +1354,49 @@ class ScientificFigureExporterDB(AFXDataDialog):
         for key in list(self._owned_preview_paths.keys()):
             if key not in preserve:
                 self._remove_owned_preview(self._owned_preview_paths[key])
+
+    def _owned_plan_key(self, path):
+        """Return a key only for this plug-in's UUID-named plan JSON files."""
+        try:
+            full_path = os.path.abspath(path)
+            if os.path.normcase(os.path.dirname(full_path)) != \
+                    os.path.normcase(self._preview_temp_dir):
+                return None
+            filename = os.path.basename(full_path)
+            if not filename.startswith('export_plan_') or \
+                    not filename.endswith('.json'):
+                return None
+            token = filename[len('export_plan_'):-len('.json')]
+            if len(token) != 32 or not all(
+                    char in '0123456789abcdefABCDEF' for char in token):
+                return None
+            return os.path.normcase(full_path)
+        except Exception:
+            return None
+
+    def _track_owned_plan(self, path):
+        key = self._owned_plan_key(path)
+        if key is None:
+            return 0
+        self._owned_plan_paths[key] = os.path.abspath(path)
+        return 1
+
+    def _remove_owned_plan(self, path):
+        key = self._owned_plan_key(path)
+        if key is None or key not in self._owned_plan_paths:
+            return 0
+        owned_path = self._owned_plan_paths[key]
+        try:
+            if os.path.isfile(owned_path):
+                os.remove(owned_path)
+            del self._owned_plan_paths[key]
+            return 1
+        except Exception:
+            return 0
+
+    def _cleanup_owned_plans(self):
+        for key in list(self._owned_plan_paths.keys()):
+            self._remove_owned_plan(self._owned_plan_paths[key])
 
     def _release_figure_preview(self, preserve_path=None):
         """Detach the current icon before removing its backing temporary PNG."""
@@ -1069,17 +1568,111 @@ class ScientificFigureExporterDB(AFXDataDialog):
     def onCmdPreview(self, sender, sel, ptr):
         return self._issue_action('preview')
 
+    def _issue_export_plan(self):
+        """Ask the Abaqus kernel to resolve the read-only export plan."""
+        if self._action_in_flight:
+            self._set_ui_text(
+                self._figure_preview_status,
+                'A preview/export command is still running. Please wait.')
+            return 1
+        self.form.actionKw.setValue('plan')
+        if not self.form.doCustomChecks(show_errors=True):
+            return 1
+        try:
+            if not os.path.isdir(self._preview_temp_dir):
+                os.makedirs(self._preview_temp_dir)
+            plan_path = os.path.join(
+                self._preview_temp_dir,
+                'export_plan_%s.json' % uuid.uuid4().hex)
+            while os.path.exists(plan_path):
+                plan_path = os.path.join(
+                    self._preview_temp_dir,
+                    'export_plan_%s.json' % uuid.uuid4().hex)
+        except Exception as error:
+            showAFXErrorDialog(getAFXApp().getAFXMainWindow(),
+                               _afx_string(str(error)))
+            return 1
+        if not self._track_owned_plan(plan_path):
+            showAFXErrorDialog(
+                getAFXApp().getAFXMainWindow(),
+                _afx_string('Could not prepare a safe export plan file.'))
+            return 1
+        self.form.planPathKw.setValue(plan_path)
+        self.form._pending_export_plan_path = plan_path
+        self._set_ui_text(
+            self._figure_preview_status,
+            'Preparing the export plan in the Abaqus kernel...')
+        self._action_in_flight = True
+        try:
+            self.form.issueCommands()
+        except Exception as error:
+            self._action_in_flight = False
+            self.form._pending_export_plan_path = None
+            self.form.planPathKw.setValue('')
+            self._remove_owned_plan(plan_path)
+            showAFXErrorDialog(getAFXApp().getAFXMainWindow(),
+                               _afx_string(str(error)))
+        return 1
+
+    def _show_export_plan_from_path(self, path):
+        try:
+            with open(path, 'rb') as stream:
+                rows = json.load(stream)
+            if not isinstance(rows, list) or not rows:
+                raise ValueError('The export plan is empty.')
+            dialog = ExportPlanDialog(
+                self, rows, self.ID_EXPORT_PLAN_CONFIRM,
+                self.ID_EXPORT_PLAN_CANCEL)
+            self._export_plan_dialog = dialog
+            dialog.create()
+            dialog.showModal(self)
+        except Exception as error:
+            self._export_plan_dialog = None
+            showAFXErrorDialog(getAFXApp().getAFXMainWindow(),
+                               _afx_string(str(error)))
+        finally:
+            self.form.planPathKw.setValue('')
+            self._remove_owned_plan(path)
+
+    def _discard_export_plan_dialog(self):
+        dialog = self._export_plan_dialog
+        self._export_plan_dialog = None
+        if dialog is not None:
+            try:
+                dialog.hide()
+            except Exception:
+                pass
+
     def onCmdExport(self, sender, sel, ptr):
+        if self._action_in_flight:
+            self._set_ui_text(
+                self._figure_preview_status,
+                'A preview/export command is still running. Please wait.')
+            return 1
+        self._discard_export_plan_dialog()
+        return self._issue_export_plan()
+
+    def onCmdConfirmExportPlan(self, sender, sel, ptr):
+        self._discard_export_plan_dialog()
         return self._issue_action('export')
+
+    def onCmdCancelExportPlan(self, sender, sel, ptr):
+        self._discard_export_plan_dialog()
+        return 1
 
     def onCmdReset(self, sender, sel, ptr):
         return self._issue_action('reset')
 
     def onCmdClose(self, sender, sel, ptr):
+        self._discard_export_plan_dialog()
         self._cancel_live_preview_timeout()
         try:
-            from scientificFigureExporter_kernel import exportFigures
-            exportFigures(action='reset')
+            # This callback runs in the Abaqus GUI process.  Reset must be sent
+            # through the kernel command route; importing the kernel module
+            # here raises "abaqus module may only be imported...".
+            sendCommand(
+                "import scientificFigureExporter_kernel; "
+                "scientificFigureExporter_kernel.exportFigures(action='reset')")
         except Exception:
             # Closing the dialog must remain possible even if a stale preview
             # state belongs to a viewport that the user closed meanwhile.
@@ -1139,6 +1732,64 @@ class ScientificFigureExporterDB(AFXDataDialog):
             self._set_ui_text(self._calculated_label,
                               'Calculated: check dimensions')
 
+    def _update_batch_status(self, kernel_session, current):
+        if self._batch_status is None:
+            return
+        if not self._is_odb_context:
+            self._set_ui_text(
+                self._batch_status,
+                'Static batch requires an ODB viewport. Step names and Frame '
+                'indices are 0-based within the selected Step.')
+            return
+        try:
+            viewport = kernel_session.viewports[current]
+            odb = viewport.displayedObject
+            step_names = list(odb.steps.keys())
+            field_frame = tuple(viewport.odbDisplay.fieldFrame)
+            step_name = step_names[int(field_frame[0])]
+            frame_count = len(odb.steps[step_name].frames)
+            self._set_ui_text(
+                self._batch_status,
+                'Current ODB: Step %s | Frame %d/%d. Blank Step = current; '
+                'preview shows the first batch combination.',
+                step_name, int(field_frame[1]), max(0, frame_count - 1))
+        except Exception:
+            self._set_ui_text(
+                self._batch_status,
+                'ODB detected. Enter an exact Step name or leave it blank for '
+                'the current Step; Frame indices are 0-based.')
+
+    def _update_field_selection_summary(self):
+        if self._field_selection_summary is None:
+            return
+        selected = []
+        seen = set()
+        for keyword in (self.form.fieldOutputsKw,
+                        self.form.customFieldOutputsKw):
+            try:
+                value = keyword.getValue()
+            except Exception:
+                value = ''
+            try:
+                if isinstance(value, unicode):
+                    value = value.encode('utf-8')
+            except NameError:
+                pass
+            for token in str(value).split('|'):
+                token = token.strip()
+                key = _field_output_request_key(token)
+                if token and key not in seen:
+                    seen.add(key)
+                    selected.append(token)
+        if selected:
+            self._set_ui_text(
+                self._field_selection_summary,
+                '%d Field Output(s) selected.', len(selected))
+        else:
+            self._set_ui_text(
+                self._field_selection_summary,
+                'No field filter (keep current output).')
+
     def _ratio_from_keywords(self, width, height):
         name = self.form.aspectKw.getValue()
         ratios = {'16:9': 16.0 / 9.0, '3:2': 3.0 / 2.0,
@@ -1160,8 +1811,14 @@ class ScientificFigureExporterDB(AFXDataDialog):
         # The title-bar X can unpost this dialog without going through the
         # custom Close button. Never leave a FOX timer targeting a hidden
         # dialog that the form is retaining for its next activation.
+        self._discard_export_plan_dialog()
         self._cancel_live_preview_timeout()
         self.form._deactivated = True
+        plan_path = self.form._pending_export_plan_path
+        self.form._pending_export_plan_path = None
+        if plan_path:
+            self._remove_owned_plan(plan_path)
+        self._cleanup_owned_plans()
         self._release_figure_preview(
             preserve_path=self.form._pending_figure_preview_path)
         return AFXDataDialog.hide(self)
@@ -1172,7 +1829,11 @@ class ScientificFigureExporterDB(AFXDataDialog):
         self._refresh_viewports()
         self._update_output_widgets()
         self._update_calculated_size()
+        self._update_field_selection_summary()
         AFXDataDialog.show(self)
+        if not self._ui_font_targets:
+            self._capture_ui_fonts()
+        self._apply_ui_scale(resize_window=True)
         if self._live_preview_enabled:
             self._schedule_live_preview()
 
@@ -1219,6 +1880,7 @@ class ScientificFigureExporterDB(AFXDataDialog):
             odb_enabled = bool(target_odb) and all(target_odb)
             contour_enabled = odb_enabled and bool(target_contour) and all(target_contour)
             self._set_odb_controls(odb_enabled, contour_enabled)
+            self._update_batch_status(kernel_session, current)
             if names:
                 self.form.viewportNamesKw.setValue('|'.join(names))
                 if all_scope and target_odb and not all(target_odb):
@@ -1256,6 +1918,8 @@ class ScientificFigureExporterForm(AFXForm):
     def __init__(self, owner):
         AFXForm.__init__(self, owner)
         self._pending_figure_preview_path = None
+        self._pending_export_plan_path = None
+        self._pending_field_catalog = False
         self._deactivated = False
 
         self.cmd = AFXGuiCommand(self, 'exportFigures',
@@ -1277,6 +1941,16 @@ class ScientificFigureExporterForm(AFXForm):
         self.viewportScopeKw = AFXIntKeyword(self.cmd, 'viewportScope', TRUE)
         self.viewportNamesKw = AFXStringKeyword(self.cmd, 'viewportNames', TRUE)
         self.exportModeKw = AFXIntKeyword(self.cmd, 'exportMode', TRUE)
+        self.fieldOutputsKw = AFXStringKeyword(
+            self.cmd, 'fieldOutputs', TRUE)
+        self.customFieldOutputsKw = AFXStringKeyword(
+            self.cmd, 'customFieldOutputs', TRUE)
+        self.stepNameKw = AFXStringKeyword(self.cmd, 'stepName', TRUE)
+        self.frameSelectionKw = AFXIntKeyword(
+            self.cmd, 'frameSelection', TRUE)
+        self.everyNKw = AFXIntKeyword(self.cmd, 'everyN', TRUE)
+        self.specifiedFramesKw = AFXStringKeyword(
+            self.cmd, 'specifiedFrames', TRUE)
 
         self.renderStyleKw = AFXStringKeyword(self.cmd, 'renderStyle', TRUE)
         self.visibleEdgesKw = AFXStringKeyword(self.cmd, 'visibleEdges', TRUE)
@@ -1332,10 +2006,17 @@ class ScientificFigureExporterForm(AFXForm):
         self.namingTemplateKw = AFXStringKeyword(
             self.cmd, 'namingTemplate', TRUE)
         self.previewPathKw = AFXStringKeyword(self.cmd, 'previewPath', TRUE)
+        self.planPathKw = AFXStringKeyword(self.cmd, 'planPath', TRUE)
 
         self.viewportScopeKw.setValue(0)
         self.viewportNamesKw.setValue('')
         self.exportModeKw.setValue(0)
+        self.fieldOutputsKw.setValue('')
+        self.customFieldOutputsKw.setValue('')
+        self.stepNameKw.setValue('')
+        self.frameSelectionKw.setValue(0)
+        self.everyNKw.setValue(1)
+        self.specifiedFramesKw.setValue('0|5|10')
         self.renderStyleKw.setValue('As Current')
         self.visibleEdgesKw.setValue('As Current')
         self.translucencyKw.setValue(0)
@@ -1362,6 +2043,7 @@ class ScientificFigureExporterForm(AFXForm):
         self.namingTemplateKw.setValue('{name}_{view}')
         self.previewPathKw.setValue(os.path.join(
             tempfile.gettempdir(), 'ScientificFigureExporter_preview.png'))
+        self.planPathKw.setValue('')
 
     def getFirstDialog(self):
         if not hasattr(self, 'mainDB') or self.mainDB is None:
@@ -1376,6 +2058,10 @@ class ScientificFigureExporterForm(AFXForm):
         self._deactivated = True
         if db is not None:
             db._cancel_live_preview_timeout()
+            plan_path = self._pending_export_plan_path
+            self._pending_export_plan_path = None
+            if plan_path:
+                db._remove_owned_plan(plan_path)
             db._release_figure_preview(
                 preserve_path=self._pending_figure_preview_path)
         AFXForm.deactivate(self)
@@ -1384,17 +2070,23 @@ class ScientificFigureExporterForm(AFXForm):
         """Release the action lock when the kernel command fails asynchronously."""
         preview_path = self._pending_figure_preview_path
         self._pending_figure_preview_path = None
+        plan_path = self._pending_export_plan_path
+        self._pending_export_plan_path = None
+        self._pending_field_catalog = False
         db = getattr(self, 'mainDB', None)
         if db is not None:
             db._action_in_flight = False
             if preview_path:
                 db._remove_owned_preview(preview_path)
+            if plan_path:
+                db._remove_owned_plan(plan_path)
+        self.planPathKw.setValue('')
         return AFXForm.handleException(self, exc)
 
     def doCustomChecks(self, show_errors=True):
         """Validate the action already selected by the native button callback."""
         db = self.getFirstDialog()
-        if self.actionKw.getValue() == 'reset':
+        if self.actionKw.getValue() in ('reset', 'fields', 'fields_all'):
             return 1
 
         def reject(message):
@@ -1410,6 +2102,7 @@ class ScientificFigureExporterForm(AFXForm):
         if not selected:
             return reject('Select at least one view.')
 
+        db._refresh_viewports()
         try:
             width = int(self.widthKw.getValue())
             height = int(self.heightKw.getValue())
@@ -1439,10 +2132,24 @@ class ScientificFigureExporterForm(AFXForm):
                     'Combined canvas with All open viewports supports one '
                     'selected view at a time. For multiple view presets, '
                     'choose Current viewport.')
+            frame_mode = int(self.frameSelectionKw.getValue())
+            if frame_mode not in (0, 1, 2, 3, 4):
+                raise ValueError('Unknown Frame selection mode.')
+            if frame_mode == 3 and int(self.everyNKw.getValue()) <= 0:
+                raise ValueError('Every N Frames must be greater than zero.')
+            if frame_mode == 4 and not self.specifiedFramesKw.getValue().strip():
+                raise ValueError('Specify at least one Frame index.')
+            batch_requested = bool(
+                self.fieldOutputsKw.getValue().strip() or
+                self.customFieldOutputsKw.getValue().strip() or
+                self.stepNameKw.getValue().strip() or frame_mode != 0)
+            if batch_requested and not db._is_odb_context:
+                raise ValueError(
+                    'Field/Frame batch export requires a viewport displaying '
+                    'an ODB.')
         except Exception as error:
             return reject(str(error))
 
-        db._refresh_viewports()
         db._update_calculated_size()
         return 1
 
@@ -1450,6 +2157,10 @@ class ScientificFigureExporterForm(AFXForm):
         """Update the GUI only after the kernel completed its render command."""
         preview_path = self._pending_figure_preview_path
         self._pending_figure_preview_path = None
+        plan_path = self._pending_export_plan_path
+        self._pending_export_plan_path = None
+        field_catalog = self._pending_field_catalog
+        self._pending_field_catalog = False
         db = self.getFirstDialog()
         db._action_in_flight = False
         if preview_path:
@@ -1457,6 +2168,13 @@ class ScientificFigureExporterForm(AFXForm):
                 db._remove_owned_preview(preview_path)
             else:
                 db._load_figure_preview(preview_path)
+        if plan_path:
+            if self._deactivated:
+                db._remove_owned_plan(plan_path)
+            elif field_catalog:
+                db._show_field_catalog_from_path(plan_path)
+            else:
+                db._show_export_plan_from_path(plan_path)
         AFXForm.doCustomTasks(self)
         if db._live_preview_enabled and db._live_preview_dirty:
             db._schedule_live_preview()

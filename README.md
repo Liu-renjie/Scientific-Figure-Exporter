@@ -4,14 +4,16 @@ Abaqus/CAE plug-in for composing viewport figures, previewing the rendered resul
 
 [English](#english) | [简体中文](#中文)
 
-![Version](https://img.shields.io/badge/version-v0.1-blue) ![Abaqus](https://img.shields.io/badge/Abaqus%2FCAE-2021-informational) ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-V0.2-blue) ![Abaqus](https://img.shields.io/badge/Abaqus%2FCAE-2021-informational) ![License](https://img.shields.io/badge/license-MIT-green)
+
+[Download V0.2 / 下载 V0.2](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.2) · [Release notes / 更新说明](docs/releases/v0.2.md) · [Word user guide / Word 使用说明](docs/ScientificFigureExporter_User_Guide.docx)
 
 ## English
 
 Scientific Figure Exporter helps prepare clean figures directly from Abaqus/CAE viewports. It supports standard views, existing multi-viewport layouts, display and contour styling, an in-dialog preview, and raster or vector export.
 
-**Version:** v0.1  
-**Verified target:** Windows + Abaqus/CAE 2021 (embedded Python 2.7)  
+**Version:** V0.2
+**Verified target:** Windows + Abaqus/CAE 2021 (embedded Python 2.7)
 **Interface:** English
 
 ### Features
@@ -19,12 +21,31 @@ Scientific Figure Exporter helps prepare clean figures directly from Abaqus/CAE 
 - **Choose views and arrange panels.** Use the current camera or standard views: Iso, Front, Back, Left, Right, Top, and Bottom. Export one viewport or all open viewports, as separate files or as one combined canvas.
 - **Style the display.** Where supported by the target viewport, configure render style, visible edges, translucency, contour spectrum, interval count, and contour range.
 - **Control annotations and background.** Toggle supported viewport decorations and existing Text / arrows annotations. Choose a solid, gradient, or no-viewport background; the Journal light and Presentation dark presets set background colors.
-- **Preview before export.** The dialog includes a rendered PNG thumbnail and can refresh it automatically when settings change. The thumbnail is limited to 420 x 315 pixels; it is not the full-resolution output.
-- **Set publication dimensions.** Choose an aspect ratio and pixel dimensions, or calculate the output size from publication width and DPI. Filename templates can include `{name}`, `{view}`, and `{viewport}`.
+- **Preview before export.** The dialog includes a rendered PNG thumbnail and can refresh it automatically when settings change. The compact thumbnail is limited to 240 x 180 pixels; it is not the full-resolution output.
+- **Compact single-screen UI.** The dialog keeps a resizable window, uses shorter wrapped labels, and provides Compact/Standard UI size presets at the bottom.
+- **Set publication dimensions.** Choose an aspect ratio and pixel dimensions, or calculate the output size from publication width and DPI. Filename templates can include `{name}`, `{field}`, `{step}`, `{frame}`, `{view}`, and `{viewport}`.
 - **Export common figure formats.** PNG, TIFF, and SVG are supported. JPG is supported on Windows through the built-in GDI+ encoder.
+- **Batch Field Output export.** Open the field selector to read the available variable labels from the selected ODB Step. The initial scan checks the selected Step's current Frame so the dialog can open more promptly on large ODBs; use **Scan all Frames** when a sparse output is needed. Its extended-selection list supports mouse-drag range selection and Ctrl/Shift selection, so you are not limited to a built-in list of five variables. Export uses the same view, background, legend, resolution, and naming rules and validates every target Frame.
+- **Batch Frame export.** For one Step, export the current, first, last, every-N, or specified 0-based Frame indices. This produces static loading, thermal, damage, or cure sequences; animation is intentionally not included in V0.2.
 
-![Contour, spectrum, and viewport background controls](docs/assets/contour_style_reference.png)
-![Contour, spectrum, and viewport background controls](docs/assets/contour_style_reference1.png)
+![V0.2 main dialog](docs/assets/ui_v0.2.png)
+![Select ODB components and invariants](docs/assets/field_outputs_v0.2.png)
+
+### Field components and performance
+
+The Field Output selector now also lists available components and invariants,
+for example `S, Mises`, `S, S11`, `S, S22`, `U, Magnitude`, and `U, U1`.
+Choose several rows with drag selection or Ctrl/Shift. Subitems are discovered
+from the ODB metadata and included in filenames, so components do not overwrite
+one another. A plain variable row retains the existing automatic refinement.
+The selector reads metadata through the kernel command; it does not transfer
+ODB field values through the GUI proxy.
+
+The export plan resolves filenames and Frame indices without loading every
+FieldOutput. Availability is checked before the actual export writes images.
+Preview validates and renders only its first field/Frame combination; all
+selected combinations are checked for Export. Large meshes still incur native
+Abaqus contour computation and rendering time.
 
 ### Important camera setting
 
@@ -33,7 +54,7 @@ Scientific Figure Exporter helps prepare clean figures directly from Abaqus/CAE 
 ### Installation
 
 1. Close Abaqus/CAE before installing or updating the plug-in.
-2. Download and extract the [v0.1 release](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.1), or clone this repository.
+2. Download and extract the **Scientific-Figure-Exporter-V0.2.zip** asset from the [V0.2 release](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.2), or clone this repository.
 3. Open a command prompt in the extracted repository folder and run:
 
    ```powershell
@@ -50,6 +71,8 @@ You can install manually instead: copy `scientificFigureExporter_plugin.py`, `sc
 
 **Combine viewports that are already arranged in Abaqus/CAE:** arrange the viewports first, select **Current**, set **Scope** to **All open viewports**, and set **Output layout** to **Combined canvas**. Turn **Auto Fit** off to preserve manually adjusted cameras. Preview the canvas, then export.
 
+When **Export** is clicked, a read-only export plan table is shown before any file is written. It lists the resolved Field Output, Step, Frame, viewport/view, and filename for every planned image, and marks how many existing outputs will be overwritten. Confirm the table to start the export, or cancel to return to the plug-in.
+
 **Create a panel of standard views from one viewport:** select **Current viewport**, choose multiple views, and set **Output layout** to **Combined canvas**. Combining multiple selected views with **All open viewports** is not supported; choose one view for that scope.
 
 Preview temporarily applies display settings. Use **Reset** or close the dialog to return to the pre-preview state. The final export uses the settings in the Output tab; the preview remains a small PNG thumbnail regardless of the selected output format.
@@ -59,9 +82,12 @@ Preview temporarily applies display settings. Use **Reset** or close the dialog 
 - **PNG, TIFF, SVG:** exported through Abaqus/CAE's print-to-file support.
 - **JPG:** Windows only. The plug-in renders through PNG and converts with Windows GDI+ at quality 95. JPEG has no alpha channel, so transparent pixels are composited over white.
 - **EPS:** not included in this release.
-- **Contour controls:** available only when the target viewport displays a compatible ODB contour plot. In multi-viewport scope, every target viewport must satisfy the relevant conditions.
+- **Contour controls:** available only when the target viewport displays a compatible ODB contour plot. In multi-viewport scope, every target viewport must satisfy the relevant conditions. Disabled contour settings are left unchanged and do not block a valid non-contour export.
 - **Text / arrows:** toggles annotations that already exist in the model or ODB; it does not create new annotations.
 - **Combined canvas:** with **All open viewports**, select one view at a time. Multiple standard views can be combined when using **Current viewport** scope.
+- **Static ODB batches:** click **Choose Field Outputs...** to scan the selected Step's current Frame (the current Step when the Step field is blank). If an unusual ODB has a field that appears only in another Frame, click **Scan all Frames** in the selector. The list supports drag-selection of ranges and Ctrl/Shift multi-selection. Leave the selection blank to keep the current primary variable. Export validates that every selected variable exists in each Frame being exported. Frame indices are 0-based; **Every N** also includes the final Frame.
+- **Batch filenames:** the existing `{name}_{view}` default is preserved for single exports. When a Field Output or non-current Frame selection is active, missing `{field}`, `{step}`, and `{frame}` tokens are inserted automatically to prevent overwriting; you can also place these tokens explicitly in the naming template.
+- **Export plan:** the confirmation table is read-only and does not write a CSV. The actual exporter still applies the same existing overwrite behavior after confirmation.
 - **Abaqus compatibility:** only Windows with Abaqus/CAE 2021 has been verified. Other Abaqus versions and operating systems have not been tested.
 
 ### Troubleshooting
@@ -98,8 +124,8 @@ If you paid someone to obtain this plugin, or encounter links selling it, please
 
 Scientific Figure Exporter 是一个 Abaqus/CAE 插件，用于整理视口、预览渲染效果，并导出适合论文和报告使用的图像。插件支持标准视图、已有的多视口布局、显示与等值线样式设置，以及栅格和矢量格式输出。
 
-**版本：** v0.1  
-**验证环境：** Windows + Abaqus/CAE 2021（内置 Python 2.7）  
+**版本：** V0.2
+**验证环境：** Windows + Abaqus/CAE 2021（内置 Python 2.7）
 **插件界面：** 英文
 
 ### 功能特点
@@ -107,11 +133,20 @@ Scientific Figure Exporter 是一个 Abaqus/CAE 插件，用于整理视口、�
 - **视图与子图布局：** 使用当前视角，或选择 Iso、Front、Back、Left、Right、Top、Bottom 等标准视图。可导出单个视口或全部打开的视口，也可分别输出或合并到同一画布。
 - **显示样式：** 在目标视口支持的情况下，可设置渲染样式、可见边、透明度，以及 ODB 等值线色谱、区间数和范围。
 - **背景与标注：** 可切换支持的视口装饰及模型/ODB 中已有的 Text / arrows 标注。背景支持纯色、渐变或无视口背景；Journal light 和 Presentation dark 预设可快速设置底色。
-- **渲染预览：** 对话框内显示 PNG 预览图，并可在设置变化后自动更新。预览最大为 420 x 315 像素，仅用于检查构图，不代表最终输出分辨率。
-- **出版尺寸：** 可指定宽高比和像素尺寸，也可按出版宽度与 DPI 计算输出尺寸。文件名模板支持 `{name}`、`{view}` 和 `{viewport}` 字段。
+- **渲染预览：** 对话框内显示 PNG 预览图，并可在设置变化后自动更新。为减少窗口占用，预览最大为 240 x 180 像素，仅用于检查构图，不代表最终输出分辨率。
+- **紧凑单屏界面：** 窗口仍可拖动调整大小，长说明会自动换行，底部提供 Compact/Standard 两种界面尺寸预设。
+- **出版尺寸：** 可指定宽高比和像素尺寸，也可按出版宽度与 DPI 计算输出尺寸。文件名模板支持 `{name}`、`{field}`、`{step}`、`{frame}`、`{view}` 和 `{viewport}` 字段。
 - **常用图像格式：** 支持 PNG、TIFF、SVG；Windows 下还支持通过系统 GDI+ 转换的 JPG。
+- **批量导出 Field Output：** 点击 **Choose Field Outputs...** 后，插件通过内核读取所选 Step 当前帧的场变量、分量与不变量，例如 `S, Mises`、`S, S11`、`U, U1`；可用 **Scan all Frames** 查找只在其他帧出现的字段。列表支持拖选及 Ctrl/Shift 多选。输出沿用同一视角、背景、Legend、分辨率和命名规则。
+- **批量导出 Frame：** 在一个 Step 下可选择当前帧、首帧、末帧、每隔 N 帧或指定的 0-based 帧索引，用于生成加载、温度、损伤或固化过程的静态序列图；V0.2 暂不生成动画。
 
-![等值线色谱与视口背景设置界面](docs/assets/contour_style_reference.png)
+### 场变量分量与性能
+
+场变量列表包含 ODB 中可用的分量和不变量，例如 `S, Mises`、`S, S11`、`U, Magnitude`、`U, U1`，支持拖选和 Ctrl/Shift 多选。子项会写入文件名，避免不同分量互相覆盖。单独选择变量名时沿用自动分量规则。
+
+列表通过内核命令读取元数据，不通过 GUI 代理传输 ODB 场数据；默认只扫描当前帧，可按需扫描全部帧。导出计划只计算帧索引和文件名，正式导出写图前再检查变量及子项。Preview 只检查并渲染首个变量/帧组合，Export 检查全部组合。大模型仍需要 Abaqus 本身进行等值线计算和渲染，不能保证所有 ODB 都能即时响应。
+
+本轮公开版本统一为 **V0.2**（Git 标签 `v0.2`）；之前的内部开发标记 v1.2 不代表已发布的 GitHub 版本。旧的 v0.1 标签和发布保留不变。
 
 ### 关于 Auto Fit
 
@@ -120,7 +155,7 @@ Scientific Figure Exporter 是一个 Abaqus/CAE 插件，用于整理视口、�
 ### 安装方法
 
 1. 安装或更新插件前，先关闭 Abaqus/CAE。
-2. 下载并解压 [v0.1 发布包](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.1)，或克隆本仓库。
+2. 从 [V0.2 发布页](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.2) 下载 **Scientific-Figure-Exporter-V0.2.zip** 并解压，或克隆本仓库。
 3. 在发布目录打开命令行并运行：
 
    ```powershell
@@ -137,6 +172,8 @@ Scientific Figure Exporter 是一个 Abaqus/CAE 插件，用于整理视口、�
 
 **合并已经排好的多个视口：** 先在 Abaqus/CAE 中排好视口，插件中选择 **Current**，将 **Scope** 设为 **All open viewports**，将 **Output layout** 设为 **Combined canvas**。如需保留手动调整的视角，请关闭 **Auto Fit**。预览确认后再导出。
 
+点击 **Export** 后，插件会在真正写文件之前显示只读的导出计划表，列出每一张图解析后的 Field Output、Step、Frame、视口/视图和文件名，并提示已有文件数量。确认后才开始导出，取消则返回插件；本轮不生成导出后 CSV。
+
 **将一个视口的多个标准视图合并成子图：** 选择 **Current viewport**，勾选多个视图，并将 **Output layout** 设为 **Combined canvas**。在 **All open viewports** 范围下不能同时组合多个标准视图；该范围每次只能选择一个视图。
 
 Preview 会临时应用显示设置。点击 **Reset** 或关闭对话框可恢复预览前的状态。正式输出按 Output 标签页中的设置生成；无论最终格式为何，窗格预览始终是低分辨率 PNG 缩略图。
@@ -145,10 +182,13 @@ Preview 会临时应用显示设置。点击 **Reset** 或关闭对话框可恢�
 
 - **PNG、TIFF、SVG：** 通过 Abaqus/CAE 的 print-to-file 功能导出。
 - **JPG：** 仅限 Windows。插件先由 Abaqus 输出 PNG，再通过 Windows GDI+ 以质量 95 转换。JPEG 不支持透明通道，透明像素会铺白。
-- **EPS：** v0.1 未开放该格式。
-- **等值线控件：** 仅当目标视口显示兼容的 ODB 等值线图时可用。多视口模式下，相关设置要求所有目标视口都满足条件。
+- **EPS：** 本版本未开放该格式。
+- **等值线控件：** 仅当目标视口显示兼容的 ODB 等值线图时可用。多视口模式下，相关设置要求所有目标视口都满足条件；控件禁用时不会阻止模型或非等值线图导出。
 - **Text / arrows：** 只控制模型或 ODB 中已经存在的文字/箭头标注，不会创建新标注。
 - **Combined canvas：** 使用 **All open viewports** 时一次只能选择一个视图；要合并多个标准视图，请使用 **Current viewport**。
+- **静态批量输出：** 点击 **Choose Field Outputs...** 后，默认快速扫描所选 Step（Step 留空时为当前 Step）的当前帧；如果场变量只在其他帧出现，可在选择器中点击 **Scan all Frames** 完整扫描。列表支持鼠标拖选范围以及 Ctrl/Shift 多选。不选择字段时保留当前主变量。导出前会检查每个目标帧是否都包含所选变量。帧索引从 0 开始，**Every N** 会额外包含末帧。
+- **批量文件名：** 单图输出继续保留 `{name}_{view}` 默认规则。选择 Field Output 或非当前帧模式后，若模板缺少 `{field}`、`{step}`、`{frame}`，插件会自动插入相应字段以避免覆盖；也可以在模板中手动使用这些字段。
+- **导出计划表：** 该表只用于导出前确认，不会生成 CSV；确认后仍沿用现有的文件覆盖行为。
 - **Abaqus 版本：** 目前只验证了 Windows + Abaqus/CAE 2021；其他版本和操作系统尚未验证。
 
 ### 常见问题

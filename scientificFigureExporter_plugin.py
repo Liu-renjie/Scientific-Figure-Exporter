@@ -13,10 +13,11 @@ toolset.registerGuiMenuButton(
     object=ScientificFigureExporterForm(toolset),
     buttonText='Scientific Figure Exporter...',
     kernelInitString='import scientificFigureExporter_kernel',
-    version='0.3-phase2b',
+    version='0.2',
     author='Scientific Figure Exporter development',
     applicableModules=ALL,
     description=('Multi-view Scientific Figure Exporter with Auto Fit, '
-                 'annotation toggles, background presets, and JPG output.\n\n'
+                 'annotation toggles, background presets, JPG output, and '
+                 'static Field Output/Frame batch export.\n\n'
                  'Abaqus/CAE 2021 and Python 2.7 compatibility target.'),
     helpUrl='')
