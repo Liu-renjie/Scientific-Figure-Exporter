@@ -6,12 +6,23 @@ import sys
 import json
 import time
 from abaqus import session
-from abaqusConstants import CONTOURS_ON_DEF, INVARIANT
+from abaqusConstants import COMPONENT, CONTOURS_ON_DEF, INVARIANT
 from visualization import openOdb
 
 ROOT = os.path.abspath(os.getcwd())
 sys.path.insert(0, ROOT)
 import scientificFigureExporter_kernel as k
+import scientificFigureExporter_state as state
+
+# Shared classification must agree for both fast and fallback restoration.
+for refinement_name, expected_kind in (
+        ('Mises', INVARIANT), ('Max. Principal', INVARIANT),
+        ('Max. In-Plane Principal', INVARIANT),
+        ('Min. In-Plane Principal', INVARIANT),
+        ('Out-of-Plane Principal', INVARIANT), ('Magnitude', INVARIANT),
+        ('S11', COMPONENT), ('U1', COMPONENT)):
+    assert state._primary_refinement_kind(refinement_name) == expected_kind, refinement_name
+
 OUT = os.path.join(ROOT, 'diagnostics', 'performance_output')
 odb = openOdb(path=os.environ['SFE_BENCHMARK_ODB'], readOnly=True)
 vp = session.viewports[session.currentViewportName]
