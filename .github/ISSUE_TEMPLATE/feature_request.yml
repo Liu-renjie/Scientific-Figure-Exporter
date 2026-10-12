@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an improvement with a concrete use case.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove personal paths and proprietary data. Do not upload .odb / .cae
+        files or licensed Abaqus files.
+  - type: textarea
+    id: feature
+    attributes:
+      label: Requested feature
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Current workflow/problem
+    validations:
+      required: true
+  - type: textarea
+    id: benefit
+    attributes:
+      label: Expected benefit
+    validations:
+      required: true
+  - type: input
+    id: abaqus-version
+    attributes:
+      label: Abaqus version
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example use case
+    validations:
+      required: true
