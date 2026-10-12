@@ -188,6 +188,18 @@ def restore_session_state(session, state):
     _restore_session_state(session, state)
 
 
+def _primary_refinement_kind(refinement_name):
+    """Classify the invariant names already supported by the fast restore."""
+    from abaqusConstants import COMPONENT, INVARIANT
+    normalized = str(refinement_name).lower().replace('.', '')
+    invariant_names = (
+        'mises', 'max principal', 'mid principal', 'min principal',
+        'tresca', 'press', 'inv3', 'magnitude',
+        'max in-plane principal', 'min in-plane principal',
+        'out-of-plane principal')
+    return INVARIANT if normalized in invariant_names else COMPONENT
+
+
 def _restore_odb_result_state(viewport, values):
     """Restore the ODB frame and primary variable when Abaqus exposes them."""
     if not values:
@@ -226,18 +238,11 @@ def _restore_odb_result_state(viewport, values):
     # primaryVariable tuple.  Verified in primary_position_probe.py.  This
     # avoids loading a complete ODB Frame merely to recover its location.
     try:
-        from abaqusConstants import COMPONENT, INVARIANT
         fast_kwargs = {'variableLabel': primary[0],
                        'outputPosition': primary[1]}
         if len(primary) > 5 and primary[5]:
             refinement_name = primary[5]
-            normalized = str(refinement_name).lower().replace('.', '')
-            invariant_names = (
-                'mises', 'max principal', 'mid principal', 'min principal',
-                'tresca', 'press', 'inv3', 'magnitude',
-                'max in-plane principal', 'min in-plane principal',
-                'out-of-plane principal')
-            kind = INVARIANT if normalized in invariant_names else COMPONENT
+            kind = _primary_refinement_kind(refinement_name)
             fast_kwargs['refinement'] = (kind, refinement_name)
         odb_display.setPrimaryVariable(**fast_kwargs)
         return
@@ -260,16 +265,8 @@ def _restore_odb_result_state(viewport, values):
             'outputPosition': output_position,
         }
         if len(primary) > 5 and primary[5]:
-            from abaqusConstants import COMPONENT, INVARIANT
             refinement_name = primary[5]
-            invariant_names = (
-                'mises', 'max principal', 'mid principal',
-                'min principal', 'tresca', 'press', 'inv3',
-                'magnitude')
-            if str(refinement_name).lower() in invariant_names:
-                refinement_type = INVARIANT
-            else:
-                refinement_type = COMPONENT
+            refinement_type = _primary_refinement_kind(refinement_name)
             kwargs['refinement'] = (refinement_type, refinement_name)
         odb_display.setPrimaryVariable(**kwargs)
     except Exception:
