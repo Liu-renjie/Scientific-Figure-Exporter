@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible plug-in issue.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove personal paths and proprietary data from screenshots and logs.
+        Do not upload .odb / .cae files or licensed Abaqus files.
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: V0.2 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: abaqus-version
+    attributes:
+      label: Abaqus/CAE version
+      placeholder: "2021"
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+    validations:
+      required: true
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Affected operation
+      options: [Preview, Export, Both, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: error-log
+    attributes:
+      label: Relevant Abaqus Error Log
+      description: Paste sanitized error text, or state that no error was shown.
+      render: text
+  - type: input
+    id: odb-size
+    attributes:
+      label: Approximate ODB size
+      placeholder: e.g. 800 MB, or not applicable
+  - type: textarea
+    id: selection
+    attributes:
+      label: Field / Frame / View selection
+      description: Include the refinement/component, frame mode, viewport scope and canvas layout.
+  - type: input
+    id: output
+    attributes:
+      label: Output format and resolution
+      placeholder: e.g. PNG, 1600 x 1200 px
+  - type: dropdown
+    id: reproduction-mode
+    attributes:
+      label: Reproduced in GUI or only noGUI?
+      options: [GUI, Only noGUI, Both, Not checked]
+    validations:
+      required: true

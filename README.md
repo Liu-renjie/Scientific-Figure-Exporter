@@ -63,6 +63,9 @@ Abaqus contour computation and rendering time.
 
    The installer uses only the Python standard library and works with Python 2.7 or Python 3. It copies the six runtime modules to `%USERPROFILE%\abaqus_plugins\ScientificFigureExporter` and creates timestamped backups of files it replaces.
 
+   If a separate Python is not configured, run `abaqus python install_plugin.py`
+   from an Abaqus Command environment with Abaqus 2021 available.
+
 4. Start Abaqus/CAE and open **Plug-ins > Scientific Figure Exporter...**.
 
 You can install manually instead: copy `scientificFigureExporter_plugin.py`, `scientificFigureExporter_form.py`, `scientificFigureExporter_kernel.py`, `scientificFigureExporter_state.py`, `scientificFigureExporter_jpeg.py`, and `colorMaps.py` together into `%USERPROFILE%\abaqus_plugins\ScientificFigureExporter`. Restart Abaqus/CAE after copying. Keep the module names unchanged and keep all six files in the same folder.
@@ -117,8 +120,11 @@ Released under the [MIT License](LICENSE). Abaqus is a product of Dassault Syst�
 
 Author: **sysu@Liu Renjie**  
 Contact: [liurj6@mail2.sysu.edu.cn](mailto:liurj6@mail2.sysu.edu.cn)
-This plugin is completely free; if you find it useful, simply offer a silent word of thanks to the author.
-If you paid someone to obtain this plugin, or encounter links selling it, please contact the author.
+Scientific Figure Exporter is distributed free of charge through the official
+GitHub repository. If you obtained a paid copy, please verify its source and
+integrity against the [official release](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.2)
+and its `SHA256SUMS.txt` checksum file. These recommendations do not restrict
+the permissions granted by the MIT License.
 
 ## 中文
 
@@ -163,6 +169,9 @@ Scientific Figure Exporter 是一个 Abaqus/CAE 插件，用于整理视口、�
    ```
 
    安装器只使用 Python 标准库，可由 Python 2.7 或 Python 3 运行。它会将六个运行模块复制到 `%USERPROFILE%\abaqus_plugins\ScientificFigureExporter`；替换同名文件前会创建带时间戳的备份。
+
+   若未配置独立 Python，可在能够调用 Abaqus 2021 的 Abaqus Command 环境中
+   运行 `abaqus python install_plugin.py`。
 
 4. 启动 Abaqus/CAE，从 **Plug-ins > Scientific Figure Exporter...** 打开插件。
 
@@ -218,6 +227,7 @@ Preview 会临时应用显示设置。点击 **Reset** 或关闭对话框可恢�
 
 作者：**sysu@刘仁杰**  
 联系邮箱：[liurj6@mail2.sysu.edu.cn](mailto:liurj6@mail2.sysu.edu.cn)
-此插件完全免费，若对您有用仅需默念谢谢作者 :)
-如果您在其他人手中付费获得此插件，或遇见售卖该插件的链接，请联系作者。
+Scientific Figure Exporter 官方版本始终可在本 GitHub 仓库免费下载。
+如您通过付费渠道获得插件，建议对照[官方 Release](https://github.com/Liu-renjie/Scientific-Figure-Exporter/releases/tag/v0.2)
+与 `SHA256SUMS.txt` 校验文件确认来源和完整性。这些建议不限制 MIT License 授予的权限。
 

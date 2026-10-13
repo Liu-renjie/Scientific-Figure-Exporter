@@ -16,6 +16,9 @@ Python 2.7 or Python 3 can run the installer; no pip packages are required.
 5. Restart CAE. Open **Plug-ins > Scientific Figure Exporter...**.
 
 If Python is not on PATH, use its full executable path or install manually.
+Alternatively, from an appropriate Abaqus Command environment with Abaqus 2021
+available, run `abaqus python install_plugin.py` in the extracted folder. This
+command was checked with Abaqus 2021's Python 2.7 installer in an isolated target.
 Copy these six files together into the destination above, keeping their names:
 
 ```
@@ -58,6 +61,9 @@ Compare the result with `SHA256SUMS.txt` from the same release.
 
 若系统找不到 python，可用 Python 可执行文件的完整路径，或将上述六个运行
 文件手动复制到安装目录。文件名保持不变，六个文件必须在同一文件夹。
+也可在能够调用 Abaqus 2021 的 Abaqus Command 环境中，在解压目录运行
+`abaqus python install_plugin.py`；该形式已用 Abaqus 2021 内置 Python 2.7
+在独立测试目录验证安装成功。
 不要在多个插件搜索目录混装不同版本。Word 手册、截图和诊断脚本不是运行依赖。
 
 卸载时关闭 CAE，仅将本插件目录移出 Abaqus 插件搜索路径，不要删除整个

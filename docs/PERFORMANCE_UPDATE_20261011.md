@@ -7,7 +7,7 @@ Measurements were collected during development on 2026-10-11.
 
 Measured in actual Abaqus/CAE 2021 noGUI on one local, read-only ODB of
 180,318,784 bytes. These are individual wall-clock measurements, not a guarantee
-for the user's 800 MB or larger model. GUI interaction/IPC overhead is excluded.
+for larger ODBs. GUI interaction/IPC overhead is excluded.
 
 | Operation | Before this update | After this update |
 | --- | ---: | ---: |
@@ -64,9 +64,8 @@ plan/actual Combined filenames, and the metadata-cache size bound. Generated
 single and combined PNGs were visually inspected.
 
 Python 2.7 syntax is compiled in the noGUI benchmark, including the GUI source
-without importing abaqusGui into the kernel. No GUI click-through test or
-measurement on the user's current large ODB is claimed; the bridge was
-unreachable during this update.
+without importing abaqusGui into the kernel. These timings do not include GUI
+click-through measurements or a performance benchmark on a larger ODB.
 
 ## Reproduce
 
@@ -94,12 +93,12 @@ error is no longer overwritten by `No field filter (keep current output)`.
 This follow-up changes only the GUI source, not kernel or performance logic.
 
 ABAQUS GUI TESTED: PASS for the repaired selector in a separate Abaqus/CAE
-2021 session, opening the same 634,369,788-byte CRSC_B ODB read-only. Clicking
+2021 session, opening a local 634,369,788-byte test ODB read-only. Clicking
 Choose Field Outputs opened the native dialog; selecting U1/U2/U3 and clicking
 Use Selected updated the main form to three selected outputs. Reopening the
 selector worked; scrolling showed S, Mises and S11/S22/S33 component rows.
 Screenshots are retained locally under diagnostics/performance_output as
 field_selector_applied_gui.png, field_selector_reopened_gui.png and
 field_selector_stress_gui.png. This is selector acceptance, not a new Preview
-or Export performance measurement. The user's original live session was left
-open and unchanged. Reloading the installed GUI requires restarting Abaqus.
+or Export performance measurement. Other open CAE sessions were left unchanged.
+Reloading the installed GUI requires restarting Abaqus.
